@@ -1,0 +1,16 @@
+[package]
+name = "merkle-trie"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+allocator-api2 = "0.4.0"
+digest = "0.11.3"
+either = "1.15.0"
+tracing = "0.1.44"
+
+[dev-dependencies]
+test-log = { version = "0.2.20", features = ["color", "log", "trace"] }
+
+[features]
+nightly = []
