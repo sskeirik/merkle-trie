@@ -147,7 +147,11 @@ pub struct BitDiff {
 //
 // Output: The index of the first bit sequence of size log2(K), aligned on a log2(K) bit offset, that contains a distinct bit.
 //         If one bit string is a prefix of the other, the extra bits are considered to be distinct.
-pub fn find_first_distinct_bits(a: &[u8], a_offset: usize, a_bits: usize, b: &[u8], b_offset: usize, b_bits: usize) -> Option<BitDiff> {
+pub fn find_first_distinct_bits(a: &[u8], a_offset: usize, a_bits: Option<usize>, b: &[u8], b_offset: usize, b_bits: Option<usize>) -> Option<BitDiff> {
+
+    // computed wanted bits
+    let a_bits = a_bits.unwrap_or(a.len()*8 - a_offset);
+    let b_bits = b_bits.unwrap_or(b.len()*8 - b_offset);
 
     // check wanted vs. actual bits
     debug_assert!(a_offset + a_bits <= a.len()*8, "requested bits would overflow buffer a");
@@ -424,7 +428,7 @@ mod test {
         for (idx, (in1, in2)) in inputs.iter().enumerate() {
             println!("Loop Idx: {idx}");
 
-            let bit_diff = find_first_distinct_bits(in1, 0, in1.len()*8, in2, 0, in2.len()*8);
+            let bit_diff = find_first_distinct_bits(in1, 0, Some(in1.len()*8), in2, 0, Some(in2.len()*8));
             println!("BitDiff: {:?}", bit_diff);
 
             let res_1 = bit_diff.as_ref().map(|v| mk_bit_split::<2>(v, in1, in2));
@@ -457,7 +461,7 @@ mod test {
         ];
 
         for (a,b, a_bits) in inputs.into_iter() {
-            let diff = find_first_distinct_bits(a, 0, a_bits, b, 0, b.len() * 8).expect("failed to find prefix");
+            let diff = find_first_distinct_bits(a, 0, Some(a_bits), b, 0, Some(b.len() * 8)).expect("failed to find prefix");
             let expected_bytes =  a_bits / 8;
             let expected_bits = a_bits % 8;
             assert!(diff.prefix);
