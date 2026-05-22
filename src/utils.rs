@@ -141,33 +141,31 @@ pub struct BitDiff {
     prefix: bool,
 }
 
-// Inputs: a, b: &[u8]               - buffers that contain bit strings
-//         a_offset, b_offset: usize - shared offset that defines the start of each bit string
-//         a_bits, b_bits: usize     - the length of each bit string in bits
+// Inputs: a, b: &[u8]           - buffers that contain bit strings
+//         offset: u16           - shared offset that defines the start of each bit string
+//         a_bits, b_bits: usize - the length of each bit string in bits
 //
 // Output: The index of the first bit sequence of size log2(K), aligned on a log2(K) bit offset, that contains a distinct bit.
 //         If one bit string is a prefix of the other, the extra bits are considered to be distinct.
-pub fn find_first_distinct_bits(a: &[u8], a_offset: usize, a_bits: Option<usize>, b: &[u8], b_offset: usize, b_bits: Option<usize>) -> Option<BitDiff> {
+pub fn find_first_distinct_bits(a: &[u8], b: &[u8], offset: usize, a_bits: Option<usize>, b_bits: Option<usize>) -> Option<BitDiff> {
 
-    // computed wanted bits
-    let a_bits = a_bits.unwrap_or(a.len()*8 - a_offset);
-    let b_bits = b_bits.unwrap_or(b.len()*8 - b_offset);
+    // set default length
+    let a_bits = a_bits.unwrap_or(a.len()*8 - offset);
+    let b_bits = b_bits.unwrap_or(b.len()*8 - offset);
 
     // check wanted vs. actual bits
-    debug_assert!(a_offset + a_bits <= a.len()*8, "requested bits would overflow buffer a");
-    debug_assert!(b_offset + b_bits <= b.len()*8, "requested bits would overflow buffer b");
+    let actual_bits = (a.len()*8).min(b.len()*8);
+    let wanted_bits = a_bits.min(b_bits);
+    debug_assert!(offset + wanted_bits <= actual_bits, "requested bits would overflow underlying buffer");
 
-    // resize buffers to offset byte
-    let a = &a[a_offset / 8..];
-    let b = &b[b_offset / 8..];
+    // get start byte
+    let mut i = offset / 8;
 
-    let mut i = 0;
-
-    // if needed, handle misaligned start byte
-    let a_offset_bits = a_offset % 8;
-    let b_offset_bits = b_offset % 8;
-    if a_offset_bits != 0 || b_offset_bits != 0 {
-        let v = (a[i] & isolate_suffix_mask(a_offset_bits)) ^ (b[i] & isolate_suffix_mask(b_offset_bits));
+    // if needed, check offset, increment start byte
+    let offset_bits = offset % 8;
+    if offset_bits != 0 {
+        let isolate_suffix = !((1 << offset_bits) - 1);
+        let v = (a[i] ^ b[i]) & isolate_suffix;
         if v != 0 {
             return Some(BitDiff { index: i, bits: v.trailing_zeros() as usize % 8, prefix: false });
         }
@@ -175,10 +173,10 @@ pub fn find_first_distinct_bits(a: &[u8], a_offset: usize, a_bits: Option<usize>
     }
 
     // get byte-aligned wanted bits and bytes
-    let aligned_wanted_bits = (a_bits - a_offset_bits).min(b_bits - b_offset_bits);
+    let aligned_wanted_bits = wanted_bits - offset_bits;
     let aligned_wanted_bytes = aligned_wanted_bits / 8;
     let extra_bits = aligned_wanted_bits % 8;
-    let extra_bits_mask = isolate_prefix_mask(extra_bits);
+    let isolate_extra_bits: u8 = (1 << extra_bits) - 1;
 
     // get end byte
     let n = aligned_wanted_bytes;
@@ -208,18 +206,18 @@ pub fn find_first_distinct_bits(a: &[u8], a_offset: usize, a_bits: Option<usize>
     }
 
     // Final bits
-    if extra_bits_mask != 0 {
-        tracing::debug!("Extra bits mask: {}", to_bin::<false>(&[extra_bits_mask]));
-        let v = (a[i] ^ b[i]) & extra_bits_mask;
+    if isolate_extra_bits != 0 {
+        tracing::debug!("Extra bits mask: {}", to_bin::<false>(&[isolate_extra_bits]));
+        let v = (a[i] ^ b[i]) & isolate_extra_bits;
         if v != 0 {
             return Some(BitDiff { index: i, bits: v.trailing_zeros() as usize % 8, prefix: false });
         }
     }
 
-    // If lengths differ, we indicate that all bits matched and the prefix is true
+    // If lengths differ, the extra bits are "different"
     if a_bits != b_bits {
         tracing::debug!("Split aux returned prefix: {i}");
-        return Some(BitDiff { index: i, bits: extra_bits, prefix: true });
+        return Some(BitDiff { index: i, bits: (offset + wanted_bits) % 8, prefix: true });
     }
 
     // Otherwise, they are identical
@@ -428,7 +426,7 @@ mod test {
         for (idx, (in1, in2)) in inputs.iter().enumerate() {
             println!("Loop Idx: {idx}");
 
-            let bit_diff = find_first_distinct_bits(in1, 0, Some(in1.len()*8), in2, 0, Some(in2.len()*8));
+            let bit_diff = find_first_distinct_bits(in1, in2, 0, Some(in1.len()*8), Some(in2.len()*8));
             println!("BitDiff: {:?}", bit_diff);
 
             let res_1 = bit_diff.as_ref().map(|v| mk_bit_split::<2>(v, in1, in2));
@@ -461,7 +459,7 @@ mod test {
         ];
 
         for (a,b, a_bits) in inputs.into_iter() {
-            let diff = find_first_distinct_bits(a, 0, Some(a_bits), b, 0, Some(b.len() * 8)).expect("failed to find prefix");
+            let diff = find_first_distinct_bits(a, b, 0, Some(a_bits), None).expect("failed to find prefix");
             let expected_bytes =  a_bits / 8;
             let expected_bits = a_bits % 8;
             assert!(diff.prefix);
