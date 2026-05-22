@@ -5,11 +5,10 @@ use std::fmt::Debug;
 use digest::{Digest, Output};
 use tracing::instrument;
 
-use crate::digestible::Digestible;
-use crate::utils::{Allocator, Box, find_first_distinct_bits};
-use crate::unreachable_checked;
+use crate::digestible::{Digestible, empty_hash};
+use crate::utils::{Allocator, BitDiff, BitSeqOps, Box, find_first_distinct_bits, to_ascii, to_bin, to_hex, tz_mask};
 
-use super::data::{Trie, TrieMode, Node, Kind, Concrete, Witness};
+use super::data::{Trie, TrieMode, Node, NodeUpdate, Kind};
 
 
 impl<T: Debug + Digestible, const N: usize, const K: usize, A: Allocator + Clone + Debug, H: Digest, M: TrieMode> Node<T,N,K,A,H,M> {
@@ -51,98 +50,136 @@ impl<T: Debug + Digestible, const N: usize, const K: usize, A: Allocator + Clone
     /// 
     /// NOTE: at the cost of more complexity in set and an extra pointer on branch nodes, cases 4-5 could be supported
     #[instrument(skip_all)]
-    pub fn set(&self, key: &[u8], offset: usize, initializer: Option<T>, updater: Option<impl FnOnce(&mut T)>, alloc: A) -> Result<(), &'static str> {
+    pub fn set<U: NodeUpdate<T>>(&mut self, key: &[u8], index: usize, offset: usize, updater: U, alloc: A) -> Result<(), &'static str> {
+        use Kind::*;
 
-        let node_key = self.key;
+        let node_key = &self.key;
+        let node_key_bits = self.get_key_bits();
 
-        tracing::debug!("SET: At node {:?} with node_key({}): {} and node_key_bits: {node_key_bits}, inserting key_suffix: {}", curr_node.dump_metadata(), node_key.len(), to_bin::<false>(&node_key), to_bin::<false>(&key_suffix));
+        // tracing::debug!("SET: At node {:?} with node_key({}): {} and node_key_bits: {node_key_bits}, inserting key_suffix: {}", curr_node.dump_metadata(), node_key.len(), to_bin::<false>(&node_key), to_bin::<false>(&key_suffix));
 
+        // QUESITON: It seems like node key stamping can be replaced with offsets which has the same effect.
+        //           Would this simplify the codebase or make it more complex? 
+        //           Such a move would change how trees are represented, but the trees themsevles would be isomorphic, I believe.
         // if the keys are distinct, we need to either split off a new node or continue searching
-        let maybe_split = find_first_distinct_bits(key, None, &node_key, Some(node_key_bits));
+        let maybe_split = find_first_distinct_bits(&key[index..], node_key, offset, None, Some(node_key_bits));
 
-        // restore edge byte
-        if key.len() > node_key.len() {
-            key[node_key.len()] = edge_byte
-        }
 
-        match (&mut **curr_node, maybe_split) {
+        match (&mut self.kind, maybe_split) {
             // handle equalities
             (Branch { .. }, None) => { return Err("Cannot set key that is a proper prefix of an existing key") }
-            (Leaf { value, .. }, None) => { 
-                if let Some(updater) = updater {
-                    updater(value)
-                } else if let Some(initializer) = initializer {
-                    *value = initializer
-                } else {
-                    return Err("Did not specify intializer or updater")
-                }; 
-            },
+            (Leaf { value, .. }, None) => updater.on_occupied(value),
             // handle prefixes
-            (_, Some(s)) if s.proper_prefix() == Some(0) => { return Err("Cannot set key that is a proper prefix of an existing key") },
-            (Leaf { .. }, Some(s)) if s.proper_prefix() == Some(1) => { return Err("Cannot set key that is a proper suffix of an existing leaf") }
-            (Branch { prefix, mask, children  }, Some(s)) if s.proper_prefix() == Some(1) => { 
+            (_, Some(s)) if s.prefix == Some(0) => { return Err("Cannot set key that is a proper prefix of an existing key") },
+            (Leaf { .. }, Some(s)) if s.prefix == Some(1) => { return Err("Cannot set key that is a proper suffix of an existing leaf") }
+            (Branch { children, .. }, Some(s)) if s.prefix == Some(1) => { 
                 // in this case, we must compute child slot, set it if it doesn't exist, and search recursively if it doesn't
                 tracing::debug!("Branch: node_key < key: {:?}", s);
-                debug_assert_eq!(**prefix, node_key);
-                // get fragment of key not covered by node_key
-                let next_key = &mut key[prefix.len() - 1..];
-                tracing::debug!("next_key: {}", to_bin::<false>(next_key));
-                // compute the child slot
-                let slot = compute_key_idx(next_key, *mask);
-                // stamp the suffix
-                let orig_suffix_byte = stamp_suffix(next_key, *mask);
+                let slot = s.slot::<K>(key);
                 // if a child node already exists, search recursively
-                if let Some(child) = children[slot].as_mut() {
-                    tracing::debug!("selecting children[{slot}]=({},{})", to_hex::<false>(&child.0[0..4]).unwrap(), child.1.dump_metadata());
-                    Self::set(child, next_key, initializer, updater, buf_p, buf_a, buf_b, alloc.clone())?;
+                if let Some((hash, child)) = children[slot].as_mut() {
+                    // tracing::debug!("selecting children[{slot}]=({},{})", to_hex::<false>(&hash[0..4]), child.dump_metadata());
+                    child.set(key, s.index, s.bits, updater, alloc.clone())?;
+                    *hash = child.digest();
                 // otherwise, create one, if we have an initializer
                 } else {
-                    if let Some(initializer) = initializer {
+                    if let Some(value) = updater.on_vacant() {
                         tracing::debug!("creating new leaf with next_key");
-                        let key = Self::alloc(next_key, alloc.clone())?;
-                        let leaf = Self::Leaf { key, value: initializer, _phantom: std::marker::PhantomData };
+                        let key = s.write_suffix::<K,A>(key, alloc.clone());
+                        let leaf = Self { key, kind: Kind::Leaf { value, _phantom: std::marker::PhantomData }};
                         children[slot] = Some((leaf.digest(), Box::new_in(leaf, alloc.clone())));
                     } else {
                         return Err("Cannot create leaf with null initializer")
                     }
                 }
-                // restore original suffix byte
-                next_key[0] = orig_suffix_byte;
             }
+            // handle opaque
+            (Opaque(_), _) => return Err("Cannot set value inside an opaque branch"),
             // handle diffs
             (_, Some(s)) => {
                 // in this case, we must create:
                 // 1. a new branch node to encapsulate this diff
                 // 2. a new leaf node for our newly set value
-                if let Some(initializer) = initializer {
-                    debug_assert!(s.proper_prefix().is_none(), "internal error: prefix case was not properly handled");
-                    let BitSplit { prefix, suffixes, kind: Diff { mask, values } } = s else {
-                        unsafe { std::hint::unreachable_unchecked() }
-                    };
-                    let prefix = Self::alloc(prefix, alloc.clone())?;
+                if let Some(value) = updater.on_vacant() {
+                    debug_assert!(s.prefix.is_none(), "internal error: prefix case was not properly handled");
                     let mut children = [const { None }; K];
                     // create new leaf node for key and new_value
-                    let new_child = Self::Leaf { key: Self::alloc(suffixes[0], alloc.clone())?, value: initializer, _phantom: std::marker::PhantomData };
-                    tracing::debug!("new leaf: {}", new_child.dump_metadata());
+                    let new_child = Self { key: s.write_suffix::<K,A>(key, alloc.clone()), kind: Kind::Leaf { value, _phantom: std::marker::PhantomData } };
+                    // tracing::debug!("new leaf: {}", new_child.dump_metadata());
                     // set up children array
-                    children[values[0]] = Some((new_child.digest(), Box::new_in(new_child, alloc.clone())));
+                    children[s.slot::<K>(key)] = Some((new_child.digest(), Box::new_in(new_child, alloc.clone())));
                     // update existing node memory with new branch
-                    let new_branch = Self::Branch { prefix, mask, children };
-                    tracing::debug!("new branch: {}, old node: {}", new_branch.dump_metadata(), curr_node.dump_metadata());
-                    let mut old_curr = std::mem::replace(&mut **curr_node, new_branch);
-                    // change key segment of new node
-                    old_curr.set_key(Self::alloc(suffixes[1], alloc.clone())?);
-                    // set old_curr as child of new branch
-                    unsafe { curr_node.set_child(values[1], old_curr, None, alloc.clone())? };
+                    let new_branch = Self { key: s.write_prefix::<K,A>(key, alloc.clone()), kind: Kind::Branch { mask: s.mask::<K>(), children }};
+                    // tracing::debug!("new branch: {}, old node: {}", new_branch.dump_metadata(), curr_node.dump_metadata());
+                    let old_self_slot = s.slot::<K>(node_key);
+                    let old_self_key = s.write_suffix::<K,A>(node_key, alloc.clone());
+                    let mut old_self = std::mem::replace(self, new_branch);
+                    // update old_self's key and make it a child of the current self (a branch)
+                    old_self.key = old_self_key;
+                    unsafe { self.raw_set_child(old_self_slot, old_self, None, alloc.clone())? };
                 } else {
                     return Err("Cannot create leaf with null initializer")
                 }
             }
         }
 
-        // fixup hashptr
-        curr_hash.copy_from_slice(&curr_node.digest());
-
         Ok(())
+    }
+
+    /// returns number of bits in node key
+    /// for a branch, this is all of the bits in the prefix, excluding all bits in its final byte that overlap/succeed the diff
+    /// for a leaf, this is all of the bits in its key
+    #[inline]
+    fn get_key_bits(&self) -> usize {
+        let mask_0s = match self.kind {
+            Kind::Branch { mask, .. } => mask.trailing_zeros(),
+            Kind::Leaf { .. } | Kind::Opaque(..) => 8,
+        };
+        ((self.key.len()+1) * 8) - mask_0s as usize
+    }
+
+    /// Sets a child on this node which must be a branch
+    /// SAFTEY: must ensure caller is a branch
+    #[inline]
+    unsafe fn raw_set_child(&mut self, idx: usize, node: Self, hash: Option<Output<H>>, alloc: A) -> Result<(), &'static str> {
+        let hash = hash.unwrap_or(node.digest());
+        let node = Box::new_in(node, alloc);
+        match &mut self.kind {
+            Kind::Branch { children, .. } => children[idx] = Some((hash, node)),
+            // SAFETY: by assumption
+            Kind::Leaf { .. } | Kind::Opaque(..) => unsafe { std::hint::unreachable_unchecked() },
+        };
+        Ok(())
+    }
+
+    pub fn digest(&self) -> Output<H> {
+        let mut hasher = H::new();
+        if let Some(precomputed_digest) = self.digest_internal(&mut hasher) {
+            precomputed_digest
+        } else {
+            hasher.finalize()
+        }
+    }
+
+    fn digest_internal<D: Digest>(&self, hasher: &mut D) -> Option<Output<H>> {
+        Digest::update(hasher, &self.key);
+        match &self.kind {
+            Kind::Opaque(witness) => M::digest_opaque(witness),
+            Kind::Leaf { value, .. } => {
+                value.digest_update( hasher);
+                None
+            }
+            Kind::Branch { mask, children } => {
+                Digest::update(hasher, [*mask]);
+                for child in children {
+                    if let Some((hash, _)) = child {
+                        Digest::update(hasher, hash);
+                    } else {
+                        Digest::update(hasher, empty_hash::<H>());
+                    }
+                }
+                None
+            }
+        }
     }
 }

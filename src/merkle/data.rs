@@ -5,6 +5,7 @@ use std::convert::Infallible;
 
 use digest::{Digest, Output};
 
+use crate::unreachable_checked;
 use crate::digestible::Digestible;
 use crate::utils::{Allocator, Box};
 
@@ -45,6 +46,27 @@ pub enum Kind<T: Debug + Digestible, const N: usize, const K: usize, A: Allocato
 // A pair of a boxed node and its hash
 pub type HashNode<T, const N: usize, const K: usize, A, H, O> = (Output<H>, Box<Node<T,N,K,A,H,O>, A>);
 
+/// Trait that describes how to update values in a Node.
+pub trait NodeUpdate<V> {
+    /// a function that can update the value if it already exists.
+    fn on_occupied(self, val: &mut V);
+    /// returns the value to insert if no value is present;
+    /// None means that no value will be inserted
+    fn on_vacant(self) -> Option<V>;
+}
+// Some notes:
+// 
+// 1. This works better than passing an option<V> and FnOnce(&mut V) 
+//    to the update function because the value _V_ in both cases can 
+//    _share_ memory if desired.
+// 2. We alternatively might make `on_occupied` take a `FnOnce(&mut V)`;
+//    this permits callers to pass in a custom update function without
+//    needing to reimplement the trait; but this is an illusion, we can
+//    create a trait impl, once an for all, which takes this
+//    closure/function and routes our &mut into it.
+//    However, in general, having a closure for the update case means
+//    that we cannot safely share memory with the vacant case.
+
 // implement opaque trie node witness type
 mod sealed { pub trait Mode {} }
 
@@ -55,12 +77,19 @@ impl sealed::Mode for Witness {}
 
 pub trait TrieMode: sealed::Mode {
     type Witness<H: Digest>: Clone;
+    fn digest_opaque<H: Digest>(witness: &Self::Witness<H>) -> Option<Output<H>>;
 }
 
 impl TrieMode for Concrete {
     type Witness<H: Digest> = Infallible;
+    fn digest_opaque<H: Digest>(never: &Self::Witness<H>) -> Option<Output<H>> {
+        unreachable_checked!(never)
+    }
 }
 
 impl TrieMode for Witness {
     type Witness<H: Digest> = Output<H>;
+    fn digest_opaque<H: Digest>(digest: &Self::Witness<H>) -> Option<Output<H>> {
+        Some(digest.clone())
+    }
 }

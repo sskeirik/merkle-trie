@@ -1,5 +1,9 @@
-use digest::Digest;
+use digest::{Digest, Output};
 use either::Either;
+
+pub fn empty_hash<H: Digest>() -> Output<H> {
+    H::new().finalize()
+}
 
 /// Trait for types that can feed their content into a digest hasher.
 pub trait Digestible {
