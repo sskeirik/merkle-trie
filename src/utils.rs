@@ -131,14 +131,21 @@ pub(crate) fn stamp_suffix(suffix: &mut [u8], mask: u8) -> u8 {
     orig
 }
 
+/// Encodes a bit position in a byte string
+#[derive(Debug)]
+pub struct BitPosition {
+    /// index of a whole byte
+    pub index: usize,
+    /// bit index inside a byte
+    pub bits: usize,
+}
+
 /// Encodes a fixed length diff (sequence of log2(K) bits,
 /// aligned to a log2(K) bit boundary, always wholly contained in a single byte)
 #[derive(Debug)]
 pub struct BitDiff {
-    /// index of byte that contains the distinct bits
-    pub index: usize,
-    /// number of shared bits in (index)th byte
-    pub bits: usize,
+    /// encodes the diff location
+    pub pos: BitPosition,
     /// whether this diff is a prefix and which input was the prefix
     pub prefix: Option<usize>,
 }
@@ -169,7 +176,7 @@ pub fn find_first_distinct_bits(a: &[u8], b: &[u8], offset: usize, a_bits: Optio
         let isolate_suffix = !((1 << offset_bits) - 1);
         let v = (a[i] ^ b[i]) & isolate_suffix;
         if v != 0 {
-            return Some(BitDiff { index: i, bits: v.trailing_zeros() as usize % 8, prefix: None });
+            return Some(BitDiff { pos: BitPosition { index: i, bits: v.trailing_zeros() as usize % 8 }, prefix: None });
         }
         i += 1;
     }
@@ -193,7 +200,7 @@ pub fn find_first_distinct_bits(a: &[u8], b: &[u8], offset: usize, a_bits: Optio
         if v != 0 {
             let trailing = v.trailing_zeros() as usize; // 0..63
             let extra_bytes = trailing / 8;
-            return Some(BitDiff { index: i + extra_bytes, bits: trailing % 8, prefix: None });
+            return Some(BitDiff { pos: BitPosition { index: i + extra_bytes, bits: trailing % 8 }, prefix: None });
         }
         i += 8;
     }
@@ -202,7 +209,7 @@ pub fn find_first_distinct_bits(a: &[u8], b: &[u8], offset: usize, a_bits: Optio
     while i < n {
         let v = a[i] ^ b[i];
         if v != 0 {
-            return Some(BitDiff { index: i, bits: v.trailing_zeros() as usize % 8, prefix: None });
+            return Some(BitDiff { pos: BitPosition { index: i, bits: v.trailing_zeros() as usize % 8 }, prefix: None });
         }
         i += 1;
     }
@@ -212,14 +219,14 @@ pub fn find_first_distinct_bits(a: &[u8], b: &[u8], offset: usize, a_bits: Optio
         tracing::debug!("Extra bits mask: {}", to_bin::<false>(&[isolate_extra_bits]));
         let v = (a[i] ^ b[i]) & isolate_extra_bits;
         if v != 0 {
-            return Some(BitDiff { index: i, bits: v.trailing_zeros() as usize % 8, prefix: None });
+            return Some(BitDiff { pos: BitPosition { index: i, bits: v.trailing_zeros() as usize % 8 }, prefix: None });
         }
     }
 
     // If lengths differ, the extra bits are "different"
     if a_bits != b_bits {
         tracing::debug!("Split aux returned prefix: {i}");
-        return Some(BitDiff { index: i, bits: (offset + wanted_bits) % 8, prefix: Some((a_bits > b_bits) as usize) });
+        return Some(BitDiff { pos: BitPosition { index: i, bits: (offset + wanted_bits) % 8 }, prefix: Some((a_bits > b_bits) as usize) });
     }
 
     // Otherwise, they are identical
@@ -228,11 +235,11 @@ pub fn find_first_distinct_bits(a: &[u8], b: &[u8], offset: usize, a_bits: Optio
 
 impl BitDiff {
     pub fn mask<const K: usize>(&self) -> u8 {
-        BitSeqOps::<K>::mask(self.bits)
+        BitSeqOps::<K>::mask(self.pos.bits)
     }
 
     pub fn slot<const K: usize>(&self, src: &[u8]) -> usize {
-        BitSeqOps::<K>::mask_value(src, self.index, self.bits)
+        BitSeqOps::<K>::mask_value(src, self.pos.index, self.pos.bits)
     }
 
     pub fn write_prefix<const K: usize, A: Allocator + Clone + Debug>(&self, src: &[u8], alloc: A) -> Box<[u8], A> {
@@ -240,7 +247,7 @@ impl BitDiff {
     }
 
     pub fn write_suffix<const K: usize, A: Allocator + Clone + Debug>(&self, src: &[u8], alloc: A) -> Box<[u8], A> {
-        BitSeqOps::<K>::write_aligned_suffix(self, src, alloc)
+        BitSeqOps::<K>::write_aligned_suffix(&self.pos, src, alloc)
     }
 }
 
@@ -283,7 +290,7 @@ impl<const K: usize> BitSeqOps<K> {
     #[instrument(skip_all)]
     pub fn write_aligned_prefix<A: Allocator + Clone + Debug>(diff: &BitDiff, src: &[u8], alloc: A) -> Box<[u8],A> {
         debug_assert!(diff.prefix.is_none(), "this operation is invalid for bitstrings without a diff");
-        let BitDiff { index, bits, .. } = diff;
+        let BitDiff { pos: BitPosition { index, bits, }, .. } = diff;
         // since there are diff bits in the final byte, we must include it
         let prefix_len = index + 1;
         let mut dst = copy_slice_into_box(&src[..prefix_len], alloc);
@@ -300,16 +307,14 @@ impl<const K: usize> BitSeqOps<K> {
     ///
     /// Output: subslice of dst that contains the suffix
     #[instrument(skip_all)]
-    pub fn write_aligned_suffix<A: Allocator + Clone + Debug>(diff: &BitDiff, src: &[u8], alloc: A) -> Box<[u8],A> {
-        debug_assert!(diff.prefix.is_none(), "this operation is invalid for bitstrings without a diff");
-        let BitDiff { index, bits, .. } = diff;
-        let suffix_len = src.len() - *index;
+    pub fn write_aligned_suffix<A: Allocator + Clone + Debug>(pos: &BitPosition, src: &[u8], alloc: A) -> Box<[u8],A> {
+        let suffix_len = src.len() - pos.index;
         if suffix_len == 0 {
             return copy_slice_into_box(&[], alloc);
         }
-        let mut dst = copy_slice_into_box(&src[*index..], alloc);
+        let mut dst = copy_slice_into_box(&src[pos.index..], alloc);
         // we isolate the bits that succeed the diff
-        stamp_suffix(&mut dst, Self::mask(*bits));
+        stamp_suffix(&mut dst, Self::mask(pos.bits));
         dst
     }
 }
@@ -346,15 +351,15 @@ mod test {
         type BitSplit = (bool, u8, Vec<u8>, Vec<u8>, Vec<u8>, usize, usize);
         fn mk_bit_split<const K: usize>(diff: &BitDiff, a: &[u8], b: &[u8]) -> BitSplit {
             let p = BitSeqOps::<K>::write_aligned_prefix(&diff, a, Global).to_vec();
-            let a_s = BitSeqOps::<K>::write_aligned_suffix(&diff, a, Global).to_vec();
-            let b_s = BitSeqOps::<K>::write_aligned_suffix(&diff, b, Global).to_vec();
+            let a_s = BitSeqOps::<K>::write_aligned_suffix(&diff.pos, a, Global).to_vec();
+            let b_s = BitSeqOps::<K>::write_aligned_suffix(&diff.pos, b, Global).to_vec();
             let (mask, a_i, b_i) = if diff.prefix.is_none() {
                 println!("a was {}", to_bin::<false>(a));
                 println!("b was {}", to_bin::<false>(b));
-                println!("mask was {}", to_bin::<false>(&[BitSeqOps::<K>::mask(diff.bits)]));
-                let a_i = BitSeqOps::<K>::mask_value(a, diff.index, diff.bits);
-                let b_i = BitSeqOps::<K>::mask_value(b, diff.index, diff.bits);
-                (BitSeqOps::<K>::mask(diff.bits), a_i, b_i)
+                println!("mask was {}", to_bin::<false>(&[BitSeqOps::<K>::mask(diff.pos.bits)]));
+                let a_i = BitSeqOps::<K>::mask_value(a, diff.pos.index, diff.pos.bits);
+                let b_i = BitSeqOps::<K>::mask_value(b, diff.pos.index, diff.pos.bits);
+                (BitSeqOps::<K>::mask(diff.pos.bits), a_i, b_i)
             } else {
                 (0,0,0)
             };
@@ -483,8 +488,8 @@ mod test {
             let expected_bytes =  a_bits / 8;
             let expected_bits = a_bits % 8;
             assert!(diff.prefix.is_some());
-            assert_eq!(diff.index, expected_bytes);
-            assert_eq!(diff.bits, expected_bits);
+            assert_eq!(diff.pos.index, expected_bytes);
+            assert_eq!(diff.pos.bits, expected_bits);
         }
     }
 }

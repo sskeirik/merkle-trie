@@ -22,16 +22,19 @@ pub struct Node<T: Debug + Digestible, const N: usize, const K: usize, A: Alloca
     pub(crate) kind: Kind<T,N,K,A,H,M>,
 }
 
+#[derive(Clone)]
+pub struct BranchData<T: Debug + Digestible, const N: usize, const K: usize, A: Allocator + Clone + Debug, H: Digest, M: TrieMode> {
+    /// defines which log2(K) bits in the (key.len())th byte distinguish children of this branch
+    pub mask: u8,
+    /// the children of this branch
+    pub children: [Option<HashNode<T,N,K,A,H,M>>; K],
+}
+
  /// A generic Merkle trie node payload
 #[derive(Clone)]
 pub enum Kind<T: Debug + Digestible, const N: usize, const K: usize, A: Allocator + Clone + Debug, H: Digest, M: TrieMode> {
     /// A trie branch
-    Branch {
-        /// defines which log2(K) bits in the (key.len())th byte distinguish children of this branch
-        mask: u8,
-        /// the children of this branch
-        children: [Option<HashNode<T,N,K,A,H,M>>; K],
-    },
+    Branch(BranchData<T,N,K,A,H,M>),
     /// A trie leaf
     Leaf {
         /// the data stored at this leaf
