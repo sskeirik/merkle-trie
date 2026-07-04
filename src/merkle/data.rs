@@ -5,7 +5,6 @@ use std::convert::Infallible;
 
 use digest::{Digest, Output};
 
-use crate::unreachable_checked;
 use crate::digestible::Digestible;
 use crate::utils::{Allocator, Box};
 
@@ -15,6 +14,7 @@ pub struct Trie<T: Debug + Digestible, const N: usize, const K: usize, A: Alloca
 
  /// A generic Merkle trie node
  #[derive(Clone)]
+ #[repr(C)]
 pub struct Node<T: Debug + Digestible, const N: usize, const K: usize, A: Allocator + Clone + Debug, H: Digest, M: TrieMode> {
     /// the whole bytes that must be matched to visit this node
     pub(crate) key: Box<[u8],A>,
@@ -23,6 +23,7 @@ pub struct Node<T: Debug + Digestible, const N: usize, const K: usize, A: Alloca
 }
 
 #[derive(Clone)]
+#[repr(C)]
 pub struct BranchData<T: Debug + Digestible, const N: usize, const K: usize, A: Allocator + Clone + Debug, H: Digest, M: TrieMode> {
     /// defines which log2(K) bits in the (key.len())th byte distinguish children of this branch
     pub mask: u8,
@@ -32,6 +33,7 @@ pub struct BranchData<T: Debug + Digestible, const N: usize, const K: usize, A: 
 
  /// A generic Merkle trie node payload
 #[derive(Clone)]
+#[repr(C, u8)]
 pub enum Kind<T: Debug + Digestible, const N: usize, const K: usize, A: Allocator + Clone + Debug, H: Digest, M: TrieMode> {
     /// A trie branch
     Branch(BranchData<T,N,K,A,H,M>),
@@ -42,8 +44,12 @@ pub enum Kind<T: Debug + Digestible, const N: usize, const K: usize, A: Allocato
         /// zero-sized type that exists to record the hash algorithm used by this trie
         _phantom: std::marker::PhantomData<H>,
     },
-    /// Witness for a subtrie of unknown shape; not available in concrete tries
-    Opaque(M::Witness<H>),
+    /// Witness for a subtrie of unknown shape; not available in concrete tries.
+    /// The mode `M::Marker` is a zero-sized tag that is uninhabited for `Concrete`
+    /// (making this variant unconstructible there) and `()` for `Witness`. Note
+    /// that this variant's size does not depend on this marker, which means that
+    /// the layout can be made idenical across modes.
+    Opaque(Output<H>, M::Marker),
 }
 
 // A pair of a boxed node and its hash
@@ -79,20 +85,15 @@ impl sealed::Mode for Concrete {}
 impl sealed::Mode for Witness {}
 
 pub trait TrieMode: sealed::Mode {
-    type Witness<H: Digest>: Clone;
-    fn digest_opaque<H: Digest>(witness: &Self::Witness<H>) -> Option<Output<H>>;
+    /// Zero-sized tag for `Kind::Opaque`: uninhabited for `Concrete` (so the
+    /// variant can never be constructed), `()` for `Witness`.
+    type Marker: Clone;
 }
 
 impl TrieMode for Concrete {
-    type Witness<H: Digest> = Infallible;
-    fn digest_opaque<H: Digest>(never: &Self::Witness<H>) -> Option<Output<H>> {
-        unreachable_checked!(never)
-    }
+    type Marker = Infallible;
 }
 
 impl TrieMode for Witness {
-    type Witness<H: Digest> = Output<H>;
-    fn digest_opaque<H: Digest>(digest: &Self::Witness<H>) -> Option<Output<H>> {
-        Some(digest.clone())
-    }
+    type Marker = ();
 }

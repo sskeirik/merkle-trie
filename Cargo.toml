@@ -10,6 +10,7 @@ either = "1.15.0"
 tracing = "0.1.44"
 
 [dev-dependencies]
+sha2 = "0.11.0"
 test-log = { version = "0.2.20", features = ["color", "log", "trace"] }
 
 [features]

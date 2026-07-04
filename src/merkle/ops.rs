@@ -8,7 +8,7 @@ use tracing::instrument;
 use crate::digestible::{Digestible, empty_hash};
 use crate::utils::{Allocator, BitDiff, BitPosition, BitSeqOps, Box, find_first_distinct_bits, to_ascii, to_bin, to_hex, tz_mask};
 
-use super::data::{Trie, TrieMode, Node, NodeUpdate, Kind, BranchData};
+use super::data::{Trie, TrieMode, Node, NodeUpdate, Kind, BranchData, Concrete, Witness};
 
 pub(crate) enum FindResult<N,B> {
     ExactMatch(N),
@@ -41,7 +41,7 @@ impl<T: Debug + Digestible, const N: usize, const K: usize, A: Allocator + Clone
     }
 
     // #[instrument(skip_all)]
-    pub(crate) fn find_mut<R>(&mut self, hash: Option<&mut Output<H>>, key: &[u8], pos: BitPosition, action: impl FnOnce(BitPosition, FindResult<&mut Self, &mut BranchData<T,N,K,A,H,M>>) -> R) -> R {
+    pub(crate) fn find_mut<R>(&mut self, hash: Option<&mut Output<H>>, key: &[u8], pos: BitPosition, action: impl for <'a> FnOnce(BitPosition, FindResult<&'a mut Self, &'a mut BranchData<T,N,K,A,H,M>>) -> R) -> R {
 
         // if keys are identical, return current node and lack of diff
         let Some(split) = find_first_distinct_bits(&key[pos.index..], &self.key, pos.bits, None, Some(self.get_key_bits())) else {
@@ -199,7 +199,7 @@ impl<T: Debug + Digestible, const N: usize, const K: usize, A: Allocator + Clone
     fn digest_internal<D: Digest>(&self, hasher: &mut D) -> Option<Output<H>> {
         Digest::update(hasher, &self.key);
         match &self.kind {
-            Kind::Opaque(witness) => M::digest_opaque(witness),
+            Kind::Opaque(hash, _marker) => Some(hash.clone()),
             Kind::Leaf { value, .. } => {
                 value.digest_update( hasher);
                 None
@@ -216,5 +216,63 @@ impl<T: Debug + Digestible, const N: usize, const K: usize, A: Allocator + Clone
                 None
             }
         }
+    }
+}
+
+impl<T: Debug + Digestible, const N: usize, const K: usize, A: Allocator + Clone + Debug, H: Digest> Node<T,N,K,A,H,Concrete> {
+    pub fn to_witness(self) -> Node<T,N,K,A,H,Witness> {
+        // SAFETY: Kind is #[repr(C, u8)] and Node/BranchData are #[repr(C)], and the
+        // only field whose type varies with the mode (`Kind::Opaque`'s second field,
+        // `M::Marker`) is a zero-sized tag, so it never affects the enum's size --
+        // the `Output<H>` hash alongside it is identical in both modes. This makes
+        // Concrete and Witness instantiations of Node layout-identical; asserted
+        // below so any future change that breaks the invariant is a compile error,
+        // not silent UB.
+        //
+        // `mem::transmute` can't be used directly: rustc's static size check can't
+        // resolve `size_of` for the `key: Box<[u8], A>` field when `A` is a generic
+        // `Allocator` type parameter (it bails out with "size can vary because of
+        // A" even though A is identical on both sides). `transmute_copy` performs
+        // the same bit-for-bit reinterpretation without that compile-time check, so
+        // the `const` assertion below is what actually carries the safety proof.
+        const {
+            assert!(std::mem::size_of::<Self>() == std::mem::size_of::<Node<T,N,K,A,H,Witness>>());
+            assert!(std::mem::align_of::<Self>() == std::mem::align_of::<Node<T,N,K,A,H,Witness>>());
+        };
+        let this = std::mem::ManuallyDrop::new(self);
+        unsafe { std::mem::transmute_copy(&this) }
+    }
+}
+
+impl<T: Debug + Digestible, const N: usize, const K: usize, A: Allocator + Clone + Debug, H: Digest> Node<T,N,K,A,H,Witness> {
+    pub fn witness(&mut self, includes: Vec<&[u8]>, excludes: Vec<&[u8]>) {
+        todo!("FIXME")
+    }
+}
+
+#[cfg(test)]
+mod to_witness_tests {
+    use super::*;
+    use allocator_api2::alloc::Global;
+    use sha2::Sha256;
+
+    // Regression test for `to_witness`'s transmute: a plain `cargo build` type-checks
+    // the generic definition but never monomorphizes it (nothing in the crate calls
+    // it), so a transmute that's unsound - or that simply fails to compile - for a
+    // concrete instantiation can hide behind a green build. Instantiating it here
+    // with a concrete allocator and hasher is what actually exercises the check.
+    #[test]
+    fn preserves_key_and_digest() {
+        let leaf: Node<u64, 4, 2, Global, Sha256, Concrete> = Node {
+            key: crate::utils::copy_slice_into_box(&[1, 2, 3], Global),
+            kind: Kind::Leaf { value: 42u64, _phantom: std::marker::PhantomData },
+        };
+        let digest_before = leaf.digest();
+        let key_before = leaf.key.to_vec();
+
+        let witness = leaf.to_witness();
+
+        assert_eq!(witness.key.to_vec(), key_before);
+        assert_eq!(witness.digest(), digest_before);
     }
 }
