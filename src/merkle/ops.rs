@@ -8,7 +8,7 @@ use tracing::instrument;
 use crate::digestible::{Digestible, empty_hash};
 use crate::utils::{Allocator, BitDiff, BitPosition, BitSeqOps, Box, find_first_distinct_bits, to_ascii, to_bin, to_hex, tz_mask};
 
-use super::data::{Trie, TrieMode, Node, NodeUpdate, Kind, BranchData, Concrete, Witness};
+use super::data::{Trie, TrieMode, Node, NodeUpdate, Kind, BranchData, Concrete, Partial};
 
 pub(crate) enum FindResult<N,B> {
     ExactMatch(N),
@@ -220,7 +220,7 @@ impl<T: Debug + Digestible, const N: usize, const K: usize, A: Allocator + Clone
 }
 
 impl<T: Debug + Digestible, const N: usize, const K: usize, A: Allocator + Clone + Debug, H: Digest> Node<T,N,K,A,H,Concrete> {
-    pub fn to_witness(self) -> Node<T,N,K,A,H,Witness> {
+    pub fn to_partial(self) -> Node<T,N,K,A,H,Partial> {
         // SAFETY: Kind is #[repr(C, u8)] and Node/BranchData are #[repr(C)], and the
         // only field whose type varies with the mode (`Kind::Opaque`'s second field,
         // `M::Marker`) is a zero-sized tag, so it never affects the enum's size --
@@ -236,22 +236,22 @@ impl<T: Debug + Digestible, const N: usize, const K: usize, A: Allocator + Clone
         // the same bit-for-bit reinterpretation without that compile-time check, so
         // the `const` assertion below is what actually carries the safety proof.
         const {
-            assert!(std::mem::size_of::<Self>() == std::mem::size_of::<Node<T,N,K,A,H,Witness>>());
-            assert!(std::mem::align_of::<Self>() == std::mem::align_of::<Node<T,N,K,A,H,Witness>>());
+            assert!(std::mem::size_of::<Self>() == std::mem::size_of::<Node<T,N,K,A,H,Partial>>());
+            assert!(std::mem::align_of::<Self>() == std::mem::align_of::<Node<T,N,K,A,H,Partial>>());
         };
         let this = std::mem::ManuallyDrop::new(self);
         unsafe { std::mem::transmute_copy(&this) }
     }
 }
 
-impl<T: Debug + Digestible, const N: usize, const K: usize, A: Allocator + Clone + Debug, H: Digest> Node<T,N,K,A,H,Witness> {
+impl<T: Debug + Digestible, const N: usize, const K: usize, A: Allocator + Clone + Debug, H: Digest> Node<T,N,K,A,H,Partial> {
     pub fn witness(&mut self, includes: Vec<&[u8]>, excludes: Vec<&[u8]>) {
         todo!("FIXME")
     }
 }
 
 #[cfg(test)]
-mod to_witness_tests {
+mod witness_tests {
     use super::*;
     use allocator_api2::alloc::Global;
     use sha2::Sha256;
@@ -270,7 +270,7 @@ mod to_witness_tests {
         let digest_before = leaf.digest();
         let key_before = leaf.key.to_vec();
 
-        let witness = leaf.to_witness();
+        let witness = leaf.to_partial();
 
         assert_eq!(witness.key.to_vec(), key_before);
         assert_eq!(witness.digest(), digest_before);

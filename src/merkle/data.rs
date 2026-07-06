@@ -80,9 +80,9 @@ pub trait NodeUpdate<V> {
 mod sealed { pub trait Mode {} }
 
 pub struct Concrete;
-pub struct Witness;
+pub struct Partial;
 impl sealed::Mode for Concrete {}
-impl sealed::Mode for Witness {}
+impl sealed::Mode for Partial {}
 
 pub trait TrieMode: sealed::Mode {
     /// Zero-sized tag for `Kind::Opaque`: uninhabited for `Concrete` (so the
@@ -94,6 +94,6 @@ impl TrieMode for Concrete {
     type Marker = Infallible;
 }
 
-impl TrieMode for Witness {
+impl TrieMode for Partial {
     type Marker = ();
 }
