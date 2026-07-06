@@ -1,12 +1,15 @@
+use std::collections::HashMap;
 /// Defines the Merkle Trie operations
 
 use std::fmt::Debug;
 
 use digest::{Digest, Output};
+use itertools::{EitherOrBoth, Itertools};
 use tracing::instrument;
 
 use crate::digestible::{Digestible, empty_hash};
-use crate::utils::{Allocator, BitDiff, BitPosition, BitSeqOps, Box, find_first_distinct_bits, to_ascii, to_bin, to_hex, tz_mask};
+use crate::merkle::data::Kind::Opaque;
+use crate::utils::{Allocator, BitDiff, BitPosition, BitSeqOps, Box, find_first_distinct_bits, to_ascii, to_bin, to_hex, tz_mask, pick_mut_unchecked};
 
 use super::data::{Trie, TrieMode, Node, NodeUpdate, Kind, BranchData, Concrete, Partial};
 
@@ -14,12 +17,12 @@ pub(crate) enum FindResult<N,B> {
     ExactMatch(N),
     EmptySlot(B, usize),
     Disagreement(N, BitDiff),
+    Bounded(BitPosition, N, usize),
 }
 
 impl<T: Debug + Digestible, const N: usize, const K: usize, A: Allocator + Clone + Debug, H: Digest, M: TrieMode> Node<T,N,K,A,H,M> {
 
-    pub(crate) fn find<'a, R>(&'a self, key: &[u8], pos: BitPosition, action: impl FnOnce(BitPosition, FindResult<&'a Self, &'a BranchData<T,N,K,A,H,M>>) -> R) -> R {
-
+    pub(crate) fn find<'a, R>(&'a self, mut bound: Option<usize>, key: &[u8], pos: BitPosition, action: impl FnOnce(BitPosition, FindResult<&'a Self, &'a BranchData<T,N,K,A,H,M>>) -> R) -> R {
         // if keys are identical, return current node and lack of diff
         let Some(split) = find_first_distinct_bits(&key[pos.index..], &self.key, pos.bits, None, Some(self.get_key_bits())) else {
             return action(pos, FindResult::ExactMatch(self))
@@ -30,7 +33,12 @@ impl<T: Debug + Digestible, const N: usize, const K: usize, A: Allocator + Clone
             (Kind::Branch(branch), Some(1)) => {
                 let slot = split.slot::<K>(key);
                 if let Some((_hash, child)) = branch.children[slot].as_ref() {
-                    child.find(key, split.pos, action)
+                    match bound {
+                        Some(0) => return action(pos, FindResult::Bounded(split.pos, self, slot)),
+                        Some(ref mut n) => *n -= 1,
+                        _ => {}
+                    };
+                    child.find(bound, key, split.pos, action)
                 } else {
                     action(pos, FindResult::EmptySlot(branch,slot))
                 }
@@ -41,8 +49,7 @@ impl<T: Debug + Digestible, const N: usize, const K: usize, A: Allocator + Clone
     }
 
     // #[instrument(skip_all)]
-    pub(crate) fn find_mut<R>(&mut self, hash: Option<&mut Output<H>>, key: &[u8], pos: BitPosition, action: impl for <'a> FnOnce(BitPosition, FindResult<&'a mut Self, &'a mut BranchData<T,N,K,A,H,M>>) -> R) -> R {
-
+    pub(crate) fn find_mut<R>(&mut self, mut bound: Option<usize>, hash: Option<&mut Output<H>>, key: &[u8], pos: BitPosition, action: impl for <'a> FnOnce(BitPosition, FindResult<&'a mut Self, &'a mut BranchData<T,N,K,A,H,M>>) -> R) -> R {
         // if keys are identical, return current node and lack of diff
         let Some(split) = find_first_distinct_bits(&key[pos.index..], &self.key, pos.bits, None, Some(self.get_key_bits())) else {
             return action(pos, FindResult::ExactMatch(self))
@@ -53,7 +60,12 @@ impl<T: Debug + Digestible, const N: usize, const K: usize, A: Allocator + Clone
             (Kind::Branch(branch), Some(1)) => {
                 let slot = split.slot::<K>(key);
                 if let Some((hash, child)) = branch.children[slot].as_mut() {
-                    child.find_mut(Some(hash), key, split.pos, action)
+                    match bound {
+                        Some(0) => return action(pos, FindResult::Bounded(split.pos, self, slot)),
+                        Some(ref mut n) => *n -= 1,
+                        _ => {}
+                    };
+                    child.find_mut(bound, Some(hash), key, split.pos, action)
                 } else {
                     action(pos, FindResult::EmptySlot(branch, slot))
                 }
@@ -143,10 +155,11 @@ impl<T: Debug + Digestible, const N: usize, const K: usize, A: Allocator + Clone
                     unsafe { curr.raw_set_child(old_curr_slot, old_curr, None, alloc.clone())? };
                     Ok(())
                 }
+                Bounded(..) => unreachable!("Bound not set"),
                 _ => Err("Unsupported trie set")
             }
         };
-        self.find_mut(hash, search_key, BitPosition { index: 0, bits: 0 }, action)
+        self.find_mut(None, hash, search_key, BitPosition { index: 0, bits: 0 }, action)
     }
 
 
@@ -155,10 +168,11 @@ impl<T: Debug + Digestible, const N: usize, const K: usize, A: Allocator + Clone
         let action = |_pos, result: FindResult<&'a Self, &'a BranchData<T,N,K,A,H,M>>| {
             match result {
                 ExactMatch(Node { kind: Kind::Leaf { value, .. }, .. }) => Some(value),
+                Bounded(..) => unreachable!("Bound not set"),
                 _ => None,
             }
         };
-        self.find(search_key, BitPosition { index: 0, bits: 0 }, action)
+        self.find(None, search_key, BitPosition { index: 0, bits: 0 }, action)
     }
 
     /// returns number of bits in node key
@@ -185,6 +199,24 @@ impl<T: Debug + Digestible, const N: usize, const K: usize, A: Allocator + Clone
             Kind::Leaf { .. } | Kind::Opaque(..) => unsafe { std::hint::unreachable_unchecked() },
         };
         Ok(())
+    }
+    
+    #[inline]
+    /// Retrieves a child from this node
+    /// SAFTEY: must ensure caller is a branch and idx is within bounds
+    unsafe fn raw_get_child(&mut self, idx: usize) -> &mut Option<(Output<H>, Box<Self,A>)> {
+        match &mut self.kind {
+            Kind::Branch(BranchData { children, .. }) => unsafe { children.get_unchecked_mut(idx) },
+            // SAFETY: by assumption
+            Kind::Leaf { .. } | Kind::Opaque(..) => unsafe { std::hint::unreachable_unchecked() },
+        }
+    }
+
+    pub fn num_children(&self) -> Option<usize> {
+        match &self.kind {
+            Kind::Branch(BranchData { children , .. }) => Some(children.len()),
+            _ => None
+        }
     }
 
     pub fn digest(&self) -> Output<H> {
@@ -244,10 +276,72 @@ impl<T: Debug + Digestible, const N: usize, const K: usize, A: Allocator + Clone
     }
 }
 
-impl<T: Debug + Digestible, const N: usize, const K: usize, A: Allocator + Clone + Debug, H: Digest> Node<T,N,K,A,H,Partial> {
-    pub fn witness(&mut self, includes: Vec<&[u8]>, excludes: Vec<&[u8]>) {
-        todo!("FIXME")
+// We need to build a frontier with a set of key fragments attached to it and gradually expand that frontier
+impl<T: Debug + Digestible + Clone, const N: usize, const K: usize, A: Allocator + Clone + Debug, H: Digest + Clone> Node<T,N,K,A,H,Partial> {
+    pub fn witness_for_keys(&mut self, mut keys: Vec<&[u8]>) {
+        keys.sort();
+        keys.dedup();
+        let keys: Vec<_> = keys.into_iter().map(|k| (k, 0)).collect();
+        let mut frontier = vec![(self, keys)];
+
+        // in this loop, we repeatedly prune nodes that are NOT in our frontier
+        while frontier.len() != 0 {
+            frontier = frontier.into_iter().flat_map(|(node, keys)| {
+
+                // if this node is terminal, return immediately
+                if node.num_children().is_none() {
+                    return vec![];
+                }
+
+                // for each key, find the keys that reach a particular child slot
+                let mut per_node_keys= HashMap::new();
+                for (key, bits) in keys.into_iter() {
+                    node.find(Some(0), key, BitPosition { index: 0, bits }, |_, res| {
+                        match res {
+                            FindResult::Bounded(p, _, slot) => {
+                                let keys: &mut Vec<_> = per_node_keys.entry(slot).or_default();
+                                keys.push((&key[p.index..], p.bits));
+                            }
+                            _ => {}
+                        }
+                    })
+                };
+
+                // SAFETY: we verified this node is a branch in the num_children check
+                // we cannot move this above because this conflicts with the borrow from `node.find` above
+                let children = match &mut node.kind {
+                    Kind::Branch(BranchData { children , .. }) => children,
+                    _ => unsafe { std::hint::unreachable_unchecked() },
+                };
+
+                // prune unreached children and collect reachable child indices in a vector
+                let mut indices = Vec::with_capacity(K);
+                for idx in 0..K {
+                    if per_node_keys.contains_key(&idx) {
+                        indices.push(idx);
+                    } else {
+                        if let Some(Some((hash, child))) = children.get_mut(idx) {
+                            child.kind = Opaque(hash.clone(), ())
+                        }
+                    }
+                }
+
+                // SAFETY: all indices are disjoint and in-bounds by construction from our loop above
+                // here, we grab unique mutable references to the reachable children of this node, which is valid due to disjointness
+                let local_frontier: Vec<_> = unsafe { pick_mut_unchecked(children, &indices) };
+
+                // finally, we expand the frontier vector for each child node
+                indices.into_iter().zip(local_frontier.into_iter()).map(|(child_idx, node)| {
+                    let node = &mut *node.as_mut().expect("Child node must exist for index").1;
+                    let mut keys = per_node_keys.remove(&child_idx).expect("Cannot fail to locate existing index");
+                    keys.sort();
+                    keys.dedup();
+                    (node, keys)
+                }).collect()
+            }).collect();
+        }
     }
+
 }
 
 #[cfg(test)]

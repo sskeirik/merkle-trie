@@ -76,10 +76,12 @@ pub trait NodeUpdate<V> {
 //    However, in general, having a closure for the update case means
 //    that we cannot safely share memory with the vacant case.
 
-// implement opaque trie node witness type
+// implement opaque trie node partial type
 mod sealed { pub trait Mode {} }
 
+#[derive(Clone)]
 pub struct Concrete;
+#[derive(Clone)]
 pub struct Partial;
 impl sealed::Mode for Concrete {}
 impl sealed::Mode for Partial {}

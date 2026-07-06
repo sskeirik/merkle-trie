@@ -7,6 +7,11 @@ use std::fmt::{Debug, Write};
 
 use tracing::instrument;
 
+pub unsafe fn pick_mut_unchecked<'a, T>(arr: &'a mut [T], indices: &[usize]) -> Vec<&'a mut T> {
+    let ptr = arr.as_mut_ptr();
+    indices.iter().map(|&i| unsafe { &mut *ptr.add(i) }).collect()
+}
+
 #[macro_export]
 macro_rules! unreachable_checked {
     ($never:ident) => {
@@ -132,7 +137,7 @@ pub(crate) fn stamp_suffix(suffix: &mut [u8], mask: u8) -> u8 {
 }
 
 /// Encodes a bit position in a byte string
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct BitPosition {
     /// index of a whole byte
     pub index: usize,
