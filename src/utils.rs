@@ -247,11 +247,11 @@ impl BitDiff {
         BitSeqOps::<K>::mask_value(src, self.pos.index, self.pos.bits)
     }
 
-    pub fn write_prefix<const K: usize, A: Allocator + Clone + Debug>(&self, src: &[u8], alloc: A) -> Box<[u8], A> {
+    pub fn write_prefix<const K: usize, A: Allocator + Clone>(&self, src: &[u8], alloc: A) -> Box<[u8], A> {
         BitSeqOps::<K>::write_aligned_prefix(self, src, alloc)
     }
 
-    pub fn write_suffix<const K: usize, A: Allocator + Clone + Debug>(&self, src: &[u8], alloc: A) -> Box<[u8], A> {
+    pub fn write_suffix<const K: usize, A: Allocator + Clone>(&self, src: &[u8], alloc: A) -> Box<[u8], A> {
         BitSeqOps::<K>::write_aligned_suffix(&self.pos, src, alloc)
     }
 }
@@ -293,7 +293,7 @@ impl<const K: usize> BitSeqOps<K> {
     ///
     /// Output: subslice of dst that contains the prefix
     #[instrument(skip_all)]
-    pub fn write_aligned_prefix<A: Allocator + Clone + Debug>(diff: &BitDiff, src: &[u8], alloc: A) -> Box<[u8],A> {
+    pub fn write_aligned_prefix<A: Allocator + Clone>(diff: &BitDiff, src: &[u8], alloc: A) -> Box<[u8],A> {
         debug_assert!(diff.prefix.is_none(), "this operation is invalid for bitstrings without a diff");
         let BitDiff { pos: BitPosition { index, bits, }, .. } = diff;
         // since there are diff bits in the final byte, we must include it
@@ -312,7 +312,7 @@ impl<const K: usize> BitSeqOps<K> {
     ///
     /// Output: subslice of dst that contains the suffix
     #[instrument(skip_all)]
-    pub fn write_aligned_suffix<A: Allocator + Clone + Debug>(pos: &BitPosition, src: &[u8], alloc: A) -> Box<[u8],A> {
+    pub fn write_aligned_suffix<A: Allocator + Clone>(pos: &BitPosition, src: &[u8], alloc: A) -> Box<[u8],A> {
         let suffix_len = src.len() - pos.index;
         if suffix_len == 0 {
             return copy_slice_into_box(&[], alloc);

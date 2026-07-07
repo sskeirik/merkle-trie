@@ -3,15 +3,70 @@ use std::collections::HashMap;
 
 use std::fmt::Debug;
 
+use allocator_api2::alloc::Global;
 use digest::{Digest, Output};
 use itertools::{EitherOrBoth, Itertools};
 use tracing::instrument;
 
 use crate::digestible::{Digestible, empty_hash};
 use crate::merkle::data::Kind::Opaque;
-use crate::utils::{Allocator, BitDiff, BitPosition, BitSeqOps, Box, find_first_distinct_bits, to_ascii, to_bin, to_hex, tz_mask, pick_mut_unchecked};
+use crate::merkle::data::SimpleUpdate;
+use crate::utils::{Allocator, BitDiff, BitPosition, BitSeqOps, Box, copy_slice_into_box, find_first_distinct_bits, pick_mut_unchecked, to_ascii, to_bin, to_hex, tz_mask};
 
 use super::data::{Trie, TrieMode, Node, NodeUpdate, Kind, BranchData, Concrete, Partial};
+
+impl<T: Digestible, const N: usize, const K: usize, H: Digest> Trie<T,N,K,Global,H,Concrete> {
+    pub fn new() -> Self {
+        Self::new_in(Global)
+    }
+}
+
+impl<T: Digestible, const N: usize, const K: usize, A: Allocator + Clone, H: Digest> Trie<T,N,K,A,H,Concrete> {
+    pub fn new_in(alloc: A) -> Self {
+        Self(alloc, None)
+    }
+}
+
+impl<T: Digestible, const N: usize, const K: usize, A: Allocator + Clone, H: Digest, M: TrieMode> Trie<T,N,K,A,H,M> {
+    pub fn update<U: NodeUpdate<T>>(&mut self, search_key: &[u8], updater: U) -> Result<(), &'static str> {
+        let alloc = &self.0;
+        if let Some((hash, node)) = self.1.as_mut() {
+            node.update(Some(hash), search_key, updater, alloc.clone())?;
+        } else {
+            let Some(value) = updater.on_vacant() else {
+                return Err("Cannot create leaf with null initializer")
+            };
+            let key = copy_slice_into_box(search_key, alloc.clone());
+            let node = Node { key, kind: Kind::Leaf { value, _phantom: std::marker::PhantomData }};
+            self.1 = Some((node.digest(), node));
+        }
+        Ok(())
+    }
+
+    pub fn set(&mut self, search_key: &[u8], value: T) -> Result<(), &'static str> {
+        self.update(search_key, SimpleUpdate(value))
+    }
+
+    pub fn get<'a>(&'a self, search_key: &[u8]) -> Option<&'a T> {
+        self.1.as_ref().map(|node| node.1.get(search_key))?
+    }
+
+    pub fn digest(&self) -> Output<H> {
+        self.1.as_ref().map_or(empty_hash::<H>(), |(hash, _node)| hash.clone())
+    }
+}
+
+impl<T: Digestible, const N: usize, const K: usize, A: Allocator + Clone, H: Digest> Trie<T,N,K,A,H,Concrete> {
+    pub fn to_partial(self) -> Trie<T,N,K,A,H,Partial> {
+        Trie::<T,N,K,A,H,Partial>(self.0, self.1.map(|(hash,node)| (hash, node.to_partial())))
+    }
+}
+
+impl<T: Digestible, const N: usize, const K: usize, A: Allocator + Clone, H: Digest> Trie<T,N,K,A,H,Partial> {
+    pub fn witness_for_keys(&mut self, keys: Vec<&[u8]>) {
+        self.1.as_mut().map(|(_hash,node)| node.witness_for_keys(keys));
+    }
+}
 
 pub(crate) enum FindResult<N,B> {
     ExactMatch(N),
@@ -20,7 +75,7 @@ pub(crate) enum FindResult<N,B> {
     Bounded(BitPosition, N, usize),
 }
 
-impl<T: Debug + Digestible, const N: usize, const K: usize, A: Allocator + Clone + Debug, H: Digest, M: TrieMode> Node<T,N,K,A,H,M> {
+impl<T: Digestible, const N: usize, const K: usize, A: Allocator + Clone, H: Digest, M: TrieMode> Node<T,N,K,A,H,M> {
 
     pub(crate) fn find<'a, R>(&'a self, mut bound: Option<usize>, key: &[u8], pos: BitPosition, action: impl FnOnce(BitPosition, FindResult<&'a Self, &'a BranchData<T,N,K,A,H,M>>) -> R) -> R {
         // if keys are identical, return current node and lack of diff
@@ -115,7 +170,7 @@ impl<T: Debug + Digestible, const N: usize, const K: usize, A: Allocator + Clone
     /// 5. (leaf(node_key,value),      node_key   <  key_suffix) -> error
     /// 
     /// NOTE: at the cost of more complexity in set and an extra pointer on branch nodes, cases 4-5 could be supported
-    pub fn set<U: NodeUpdate<T>>(&mut self, hash: Option<&mut Output<H>>, search_key: &[u8], updater: U, alloc: A) -> Result<(), &'static str> {
+    pub fn update<U: NodeUpdate<T>>(&mut self, hash: Option<&mut Output<H>>, search_key: &[u8], updater: U, alloc: A) -> Result<(), &'static str> {
         use Kind::*;
         use FindResult::*;
         let action = move |pos: BitPosition, find_result: FindResult<&mut Self, &mut BranchData<T,N,K,A,H,M>>| {
@@ -201,17 +256,6 @@ impl<T: Debug + Digestible, const N: usize, const K: usize, A: Allocator + Clone
         Ok(())
     }
     
-    #[inline]
-    /// Retrieves a child from this node
-    /// SAFTEY: must ensure caller is a branch and idx is within bounds
-    unsafe fn raw_get_child(&mut self, idx: usize) -> &mut Option<(Output<H>, Box<Self,A>)> {
-        match &mut self.kind {
-            Kind::Branch(BranchData { children, .. }) => unsafe { children.get_unchecked_mut(idx) },
-            // SAFETY: by assumption
-            Kind::Leaf { .. } | Kind::Opaque(..) => unsafe { std::hint::unreachable_unchecked() },
-        }
-    }
-
     pub fn num_children(&self) -> Option<usize> {
         match &self.kind {
             Kind::Branch(BranchData { children , .. }) => Some(children.len()),
@@ -251,7 +295,7 @@ impl<T: Debug + Digestible, const N: usize, const K: usize, A: Allocator + Clone
     }
 }
 
-impl<T: Debug + Digestible, const N: usize, const K: usize, A: Allocator + Clone + Debug, H: Digest> Node<T,N,K,A,H,Concrete> {
+impl<T: Digestible, const N: usize, const K: usize, A: Allocator + Clone, H: Digest> Node<T,N,K,A,H,Concrete> {
     pub fn to_partial(self) -> Node<T,N,K,A,H,Partial> {
         // SAFETY: Kind is #[repr(C, u8)] and Node/BranchData are #[repr(C)], and the
         // only field whose type varies with the mode (`Kind::Opaque`'s second field,
@@ -277,7 +321,7 @@ impl<T: Debug + Digestible, const N: usize, const K: usize, A: Allocator + Clone
 }
 
 // We need to build a frontier with a set of key fragments attached to it and gradually expand that frontier
-impl<T: Debug + Digestible + Clone, const N: usize, const K: usize, A: Allocator + Clone + Debug, H: Digest + Clone> Node<T,N,K,A,H,Partial> {
+impl<T: Digestible, const N: usize, const K: usize, A: Allocator + Clone, H: Digest> Node<T,N,K,A,H,Partial> {
     pub fn witness_for_keys(&mut self, mut keys: Vec<&[u8]>) {
         keys.sort();
         keys.dedup();
@@ -350,6 +394,17 @@ mod witness_tests {
     use allocator_api2::alloc::Global;
     use sha2::Sha256;
 
+    type U64BinaryTrie = Trie<u64,4,2,Global,Sha256,Concrete>;
+
+    #[test]
+    fn initial_node_has_initial_key() {
+        let mut t: U64BinaryTrie = Trie::new();
+        let initial_key = &[1,2,3];
+        t.set(initial_key, 42).unwrap();
+        let (_hash, node) = t.1.unwrap();
+        assert_eq!(&*node.key, initial_key);
+    }
+
     // Regression test for `to_witness`'s transmute: a plain `cargo build` type-checks
     // the generic definition but never monomorphizes it (nothing in the crate calls
     // it), so a transmute that's unsound - or that simply fails to compile - for a
@@ -357,6 +412,8 @@ mod witness_tests {
     // with a concrete allocator and hasher is what actually exercises the check.
     #[test]
     fn preserves_key_and_digest() {
+        let mut t: U64BinaryTrie = Trie::new();
+        t.set(&[1,2,3,], 42).unwrap();
         let leaf: Node<u64, 4, 2, Global, Sha256, Concrete> = Node {
             key: crate::utils::copy_slice_into_box(&[1, 2, 3], Global),
             kind: Kind::Leaf { value: 42u64, _phantom: std::marker::PhantomData },
@@ -368,5 +425,10 @@ mod witness_tests {
 
         assert_eq!(witness.key.to_vec(), key_before);
         assert_eq!(witness.digest(), digest_before);
+    }
+
+    #[test]
+    fn witness_shape() {
+        // TODO: add tests for shape of witness trie after minimization
     }
 }

@@ -10,12 +10,12 @@ use crate::utils::{Allocator, Box};
 
  /// A generic Merkle trie
  #[derive(Clone)]
-pub struct Trie<T: Debug + Digestible, const N: usize, const K: usize, A: Allocator + Clone + Debug, H: Digest, M: TrieMode>(pub(crate) Option<(Output<H>, Node<T,N,K,A,H,M>)>);
+pub struct Trie<T: Digestible, const N: usize, const K: usize, A: Allocator + Clone, H: Digest, M: TrieMode>(pub(crate) A, pub(crate) Option<(Output<H>, Node<T,N,K,A,H,M>)>);
 
  /// A generic Merkle trie node
  #[derive(Clone)]
  #[repr(C)]
-pub struct Node<T: Debug + Digestible, const N: usize, const K: usize, A: Allocator + Clone + Debug, H: Digest, M: TrieMode> {
+pub(crate) struct Node<T: Digestible, const N: usize, const K: usize, A: Allocator + Clone, H: Digest, M: TrieMode> {
     /// the whole bytes that must be matched to visit this node
     pub(crate) key: Box<[u8],A>,
     /// the node's kind-specific data
@@ -24,7 +24,7 @@ pub struct Node<T: Debug + Digestible, const N: usize, const K: usize, A: Alloca
 
 #[derive(Clone)]
 #[repr(C)]
-pub struct BranchData<T: Debug + Digestible, const N: usize, const K: usize, A: Allocator + Clone + Debug, H: Digest, M: TrieMode> {
+pub(crate) struct BranchData<T: Digestible, const N: usize, const K: usize, A: Allocator + Clone, H: Digest, M: TrieMode> {
     /// defines which log2(K) bits in the (key.len())th byte distinguish children of this branch
     pub mask: u8,
     /// the children of this branch
@@ -34,7 +34,7 @@ pub struct BranchData<T: Debug + Digestible, const N: usize, const K: usize, A: 
  /// A generic Merkle trie node payload
 #[derive(Clone)]
 #[repr(C, u8)]
-pub enum Kind<T: Debug + Digestible, const N: usize, const K: usize, A: Allocator + Clone + Debug, H: Digest, M: TrieMode> {
+pub(crate) enum Kind<T: Digestible, const N: usize, const K: usize, A: Allocator + Clone, H: Digest, M: TrieMode> {
     /// A trie branch
     Branch(BranchData<T,N,K,A,H,M>),
     /// A trie leaf
@@ -53,7 +53,7 @@ pub enum Kind<T: Debug + Digestible, const N: usize, const K: usize, A: Allocato
 }
 
 // A pair of a boxed node and its hash
-pub type HashNode<T, const N: usize, const K: usize, A, H, O> = (Output<H>, Box<Node<T,N,K,A,H,O>, A>);
+pub(crate) type HashNode<T, const N: usize, const K: usize, A, H, O> = (Output<H>, Box<Node<T,N,K,A,H,O>, A>);
 
 /// Trait that describes how to update values in a Node.
 pub trait NodeUpdate<V> {
@@ -75,6 +75,18 @@ pub trait NodeUpdate<V> {
 //    closure/function and routes our &mut into it.
 //    However, in general, having a closure for the update case means
 //    that we cannot safely share memory with the vacant case.
+
+pub struct SimpleUpdate<V>(pub V);
+
+impl<V> NodeUpdate<V> for SimpleUpdate<V> {
+    fn on_occupied(self, val: &mut V) {
+        *val = self.0;
+    }
+
+    fn on_vacant(self) -> Option<V> {
+        Some(self.0)
+    }
+}
 
 // implement opaque trie node partial type
 mod sealed { pub trait Mode {} }
