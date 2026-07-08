@@ -8,7 +8,7 @@ allocator-api2 = "0.4.0"
 digest = "0.11.3"
 either = "1.15.0"
 itertools = "0.15.0"
-tracing = "0.1.44"
+tracing = { version = "0.1.44", features = ["release_max_level_info"] }
 
 [dev-dependencies]
 sha2 = "0.11.0"

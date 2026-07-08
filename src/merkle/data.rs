@@ -1,6 +1,5 @@
 /// Defines the Merkle Trie type structure
 
-use core::fmt::Debug;
 use std::convert::Infallible;
 
 use digest::{Digest, Output};
@@ -8,11 +7,11 @@ use digest::{Digest, Output};
 use crate::digestible::Digestible;
 use crate::utils::{Allocator, Box};
 
- /// A generic Merkle trie
- #[derive(Clone)]
+/// A generic Merkle trie that is either fully concrete or possibly partial
+#[derive(Clone)]
 pub struct Trie<T: Digestible, const N: usize, const K: usize, A: Allocator + Clone, H: Digest, M: TrieMode>(pub(crate) A, pub(crate) Option<(Output<H>, Node<T,N,K,A,H,M>)>);
 
- /// A generic Merkle trie node
+/// A generic Merkle trie node
  #[derive(Clone)]
  #[repr(C)]
 pub(crate) struct Node<T: Digestible, const N: usize, const K: usize, A: Allocator + Clone, H: Digest, M: TrieMode> {
@@ -31,7 +30,7 @@ pub(crate) struct BranchData<T: Digestible, const N: usize, const K: usize, A: A
     pub children: [Option<HashNode<T,N,K,A,H,M>>; K],
 }
 
- /// A generic Merkle trie node payload
+/// A generic Merkle trie node payload
 #[derive(Clone)]
 #[repr(C, u8)]
 pub(crate) enum Kind<T: Digestible, const N: usize, const K: usize, A: Allocator + Clone, H: Digest, M: TrieMode> {
@@ -53,7 +52,7 @@ pub(crate) enum Kind<T: Digestible, const N: usize, const K: usize, A: Allocator
 }
 
 // A pair of a boxed node and its hash
-pub(crate) type HashNode<T, const N: usize, const K: usize, A, H, O> = (Output<H>, Box<Node<T,N,K,A,H,O>, A>);
+pub(crate) type HashNode<T, const N: usize, const K: usize, A, H, M> = (Output<H>, Box<Node<T,N,K,A,H,M>, A>);
 
 /// Trait that describes how to update values in a Node.
 pub trait NodeUpdate<V> {

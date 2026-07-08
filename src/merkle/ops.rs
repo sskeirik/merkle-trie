@@ -1,19 +1,19 @@
-use std::collections::HashMap;
 /// Defines the Merkle Trie operations
 
+use std::borrow::Borrow;
+use std::collections::HashMap;
 use std::fmt::Debug;
 
 use allocator_api2::alloc::Global;
 use digest::{Digest, Output};
-use itertools::{EitherOrBoth, Itertools};
-use tracing::instrument;
+use tracing::{instrument, debug};
 
 use crate::digestible::{Digestible, empty_hash};
-use crate::merkle::data::Kind::Opaque;
-use crate::merkle::data::SimpleUpdate;
-use crate::utils::{Allocator, BitDiff, BitPosition, BitSeqOps, Box, copy_slice_into_box, find_first_distinct_bits, pick_mut_unchecked, to_ascii, to_bin, to_hex, tz_mask};
-
-use super::data::{Trie, TrieMode, Node, NodeUpdate, Kind, BranchData, Concrete, Partial};
+use crate::merkle::data::{Trie, TrieMode, Node, NodeUpdate, Kind, BranchData, Concrete, Partial, SimpleUpdate};
+use crate::utils::{Allocator, Box, copy_slice_into_box, pick_mut_unchecked};
+use crate::bitseqops::{BitDiff, BitPosition, BitSeqOps, find_first_distinct_bits};
+#[allow(unused_imports)] // permitted for debug pretty-printing
+use crate::{trace_val, utils::{to_ascii, to_bin, to_hex}};
 
 impl<T: Digestible, const N: usize, const K: usize, H: Digest> Trie<T,N,K,Global,H,Concrete> {
     pub fn new() -> Self {
@@ -23,11 +23,12 @@ impl<T: Digestible, const N: usize, const K: usize, H: Digest> Trie<T,N,K,Global
 
 impl<T: Digestible, const N: usize, const K: usize, A: Allocator + Clone, H: Digest> Trie<T,N,K,A,H,Concrete> {
     pub fn new_in(alloc: A) -> Self {
-        Self(alloc, None)
+        Trie(alloc, None)
     }
 }
 
 impl<T: Digestible, const N: usize, const K: usize, A: Allocator + Clone, H: Digest, M: TrieMode> Trie<T,N,K,A,H,M> {
+    #[must_use]
     pub fn update<U: NodeUpdate<T>>(&mut self, search_key: &[u8], updater: U) -> Result<(), &'static str> {
         let alloc = &self.0;
         if let Some((hash, node)) = self.1.as_mut() {
@@ -43,12 +44,13 @@ impl<T: Digestible, const N: usize, const K: usize, A: Allocator + Clone, H: Dig
         Ok(())
     }
 
+    #[must_use]
     pub fn set(&mut self, search_key: &[u8], value: T) -> Result<(), &'static str> {
         self.update(search_key, SimpleUpdate(value))
     }
 
     pub fn get<'a>(&'a self, search_key: &[u8]) -> Option<&'a T> {
-        self.1.as_ref().map(|node| node.1.get(search_key))?
+        self.1.as_ref().map(|(_hash, node)| node.get(search_key))?
     }
 
     pub fn digest(&self) -> Output<H> {
@@ -56,7 +58,14 @@ impl<T: Digestible, const N: usize, const K: usize, A: Allocator + Clone, H: Dig
     }
 }
 
+impl<T: Digestible + Debug, const N: usize, const K: usize, A: Allocator + Clone, H: Digest, M: TrieMode> std::fmt::Debug for Trie<T,N,K,A,H,M> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        Node::<T,N,K,A,H,M>::debug_fmt(&self.1, 0, None, f)
+    }
+}
+
 impl<T: Digestible, const N: usize, const K: usize, A: Allocator + Clone, H: Digest> Trie<T,N,K,A,H,Concrete> {
+    #[must_use]
     pub fn to_partial(self) -> Trie<T,N,K,A,H,Partial> {
         Trie::<T,N,K,A,H,Partial>(self.0, self.1.map(|(hash,node)| (hash, node.to_partial())))
     }
@@ -77,9 +86,11 @@ pub(crate) enum FindResult<N,B> {
 
 impl<T: Digestible, const N: usize, const K: usize, A: Allocator + Clone, H: Digest, M: TrieMode> Node<T,N,K,A,H,M> {
 
+    #[instrument(level="debug", skip_all)]
     pub(crate) fn find<'a, R>(&'a self, mut bound: Option<usize>, key: &[u8], pos: BitPosition, action: impl FnOnce(BitPosition, FindResult<&'a Self, &'a BranchData<T,N,K,A,H,M>>) -> R) -> R {
         // if keys are identical, return current node and lack of diff
         let Some(split) = find_first_distinct_bits(&key[pos.index..], &self.key, pos.bits, None, Some(self.get_key_bits())) else {
+            debug!("At {}:{pos:?}, exact match found", to_ascii(key));
             return action(pos, FindResult::ExactMatch(self))
         };
 
@@ -95,22 +106,29 @@ impl<T: Digestible, const N: usize, const K: usize, A: Allocator + Clone, H: Dig
                     };
                     child.find(bound, key, split.pos, action)
                 } else {
+                    debug!("At {}:{pos:?}, empty slot found at branch {}", to_ascii(key), self.dump_metadata());
                     action(pos, FindResult::EmptySlot(branch,slot))
                 }
             },
             // no subtrie to explore, return
-            _ => action(pos, FindResult::Disagreement(self, split))
+            _ => {
+                debug!("At {}:{pos:?}, disagreement {split:?} occured at: {}", to_ascii(key), self.dump_metadata());
+                action(pos, FindResult::Disagreement(self, split))
+            }
         }
     }
 
-    // #[instrument(skip_all)]
+    #[instrument(level="debug", skip_all)]
     pub(crate) fn find_mut<R>(&mut self, mut bound: Option<usize>, hash: Option<&mut Output<H>>, key: &[u8], pos: BitPosition, action: impl for <'a> FnOnce(BitPosition, FindResult<&'a mut Self, &'a mut BranchData<T,N,K,A,H,M>>) -> R) -> R {
         // if keys are identical, return current node and lack of diff
         let Some(split) = find_first_distinct_bits(&key[pos.index..], &self.key, pos.bits, None, Some(self.get_key_bits())) else {
+            debug!("At {}:{pos:?}, exact match found", to_ascii(key));
             return action(pos, FindResult::ExactMatch(self))
         };
 
         // otherwise, check if we can explore a subtrie
+        // TODO: make this conditional on debug trace enabled, if possible
+        let self_meta = self.dump_metadata();
         let result = match (&mut self.kind, split.prefix) {
             (Kind::Branch(branch), Some(1)) => {
                 let slot = split.slot::<K>(key);
@@ -122,11 +140,15 @@ impl<T: Digestible, const N: usize, const K: usize, A: Allocator + Clone, H: Dig
                     };
                     child.find_mut(bound, Some(hash), key, split.pos, action)
                 } else {
+                    debug!("At {}:{pos:?}, empty slot found at branch {}", to_ascii(key), self_meta);
                     action(pos, FindResult::EmptySlot(branch, slot))
                 }
             },
             // no subtrie to explore, return
-            _ => action(pos, FindResult::Disagreement(self, split))
+            _ => {
+                debug!("At {}:{pos:?}, disagreement {split:?} occured at: {}", to_ascii(key), self.dump_metadata());
+                action(pos, FindResult::Disagreement(self, split))
+            }
         };
         // fixup our hash if we have one
         hash.map(|h| *h = self.digest());
@@ -135,41 +157,6 @@ impl<T: Digestible, const N: usize, const K: usize, A: Allocator + Clone, H: Dig
 
     /// Given key_suffix, find existing descendant node that matches key_suffix and set its value to new_value
     /// otherwise, if matching descendant node does not exist, create one and set its value to new_value
-    /// 
-    /// This is the most complex function in the trie; there are eight possible cases defined by two independent choices:
-    /// 
-    /// 1. The current node is either (2 cases):
-    /// 
-    ///    - a leaf(node_key, value)
-    ///    - a brch(node_key, [child1,...,childK])
-    // 
-    ///    Note: to describe the common elements of a generic node, we write NODE(node_key)
-    /// 
-    /// 2. When comparing the key_suffix and node_key, their relationship is as follows (4 cases):
-    ///    - key_suffix == node_key
-    ///    - key_suffix <  node_key (key_suffix is a prefix of node_key)
-    ///    - node_key   <  key_suffix
-    ///    - key_suffix != node_key
-    /// 
-    /// We describe the required behavior of each case defined above.
-    /// Some cases must make additional distinctions.
-    /// 
-    /// Let P = key_suffix.len() and Q = node_key.len().
-    /// If key_suffix != node_suffix, let C be the length of their longest common prefix.
-    /// 
-    /// 1. (leaf(node_key,value),      key_suffix == node_key  ) -> overwrite value by new_value
-    /// 1. (brch(node_key,children),   key_suffix == node_key  ) -> error
-    /// 2. (NODE(node_key),            key_suffix != node_key  ) -> branch(common_prefix, NULL,   [...,leaf(key_suffix[C..], new_value), NODE(node_key[C..]),...])
-    /// 
-    ///    NOTE: in this case, we need to set the child nodes in the correct slot based on the diff values.
-    /// 
-    /// 3. (brch(node_key,value,chld), node_key   <  key_suffix):
-    ///    - if chld[key_suffix[Q]] == NULL                      -> set chld[key_suffix[Q]] to leaf(key_suffix[Q..])
-    ///    - otherwise                                           -> call set on chld[key_suffix[Q]] 
-    /// 4. (NODE(node_key),            key_suffix <  node_key  ) -> error
-    /// 5. (leaf(node_key,value),      node_key   <  key_suffix) -> error
-    /// 
-    /// NOTE: at the cost of more complexity in set and an extra pointer on branch nodes, cases 4-5 could be supported
     pub fn update<U: NodeUpdate<T>>(&mut self, hash: Option<&mut Output<H>>, search_key: &[u8], updater: U, alloc: A) -> Result<(), &'static str> {
         use Kind::*;
         use FindResult::*;
@@ -196,12 +183,12 @@ impl<T: Digestible, const N: usize, const K: usize, A: Allocator + Clone, H: Dig
                     let mut children = [const { None }; K];
                     // create new leaf node for search_key and new_value
                     let new_child = Self { key: split.write_suffix::<K,A>(search_key, alloc.clone()), kind: Kind::Leaf { value, _phantom: std::marker::PhantomData } };
-                    // tracing::debug!("new leaf: {}", new_child.dump_metadata());
+                    // debug!("new leaf: {}", new_child.dump_metadata());
                     // set up children array
-                    children[split.slot::<K>(&curr.key)] = Some((new_child.digest(), Box::new_in(new_child, alloc.clone())));
+                    children[split.slot::<K>(&search_key)] = Some((new_child.digest(), Box::new_in(new_child, alloc.clone())));
                     // update existing node memory with new branch
                     let new_branch = Self { key: split.write_prefix::<K,A>(&curr.key, alloc.clone()), kind: Kind::Branch(BranchData { mask: split.mask::<K>(), children }) };
-                    // tracing::debug!("new branch: {}, old node: {}", new_branch.dump_metadata(), curr_node.dump_metadata());
+                    // debug!("new branch: {}, old node: {}", new_branch.dump_metadata(), curr_node.dump_metadata());
                     let old_curr_slot = split.slot::<K>(&curr.key);
                     let old_curr_key = split.write_suffix::<K,A>(&curr.key, alloc.clone());
                     let mut old_curr = std::mem::replace(curr, new_branch);
@@ -273,14 +260,15 @@ impl<T: Digestible, const N: usize, const K: usize, A: Allocator + Clone, H: Dig
     }
 
     fn digest_internal<D: Digest>(&self, hasher: &mut D) -> Option<Output<H>> {
-        Digest::update(hasher, &self.key);
         match &self.kind {
             Kind::Opaque(hash, _marker) => Some(hash.clone()),
             Kind::Leaf { value, .. } => {
-                value.digest_update( hasher);
+                Digest::update(hasher, &self.key);
+                value.digest_update(hasher);
                 None
             }
             Kind::Branch(BranchData { mask, children }) => {
+                Digest::update(hasher, &self.key);
                 Digest::update(hasher, [*mask]);
                 for child in children {
                     if let Some((hash, _)) = child {
@@ -290,6 +278,54 @@ impl<T: Digestible, const N: usize, const K: usize, A: Allocator + Clone, H: Dig
                     }
                 }
                 None
+            }
+        }
+    }
+
+    fn dump_metadata(&self) -> String {
+        match &self.kind {
+            Kind::Leaf { .. } => format!("L({},*)", to_bin::<false>(&self.key)),
+            Kind::Branch(BranchData { mask, children: _ }) => format!("B({},{},..)", to_bin::<false>(&self.key), to_bin::<false>(&[*mask])),
+            Kind::Opaque(hash, _marker) => {
+                let hash_prefix = &hash[0..std::cmp::min(hash.len(),4)];
+                let hash_str = to_hex::<false>(hash_prefix);
+                format!("O({})", hash_str)
+            }
+        }
+    }
+}
+
+impl<T: Digestible + Debug, const N: usize, const K: usize, A: Allocator + Clone, H: Digest, M: TrieMode> Node<T,N,K,A,H,M> {
+    fn debug_fmt(trie: &Option<(Output<H>, impl Borrow<Node<T,N,K,A,H,M>>)>, depth: usize, child_num: Option<usize>, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let space = " ".repeat(depth*2);
+        write!(f, "{}", space)?;
+        if let Some(child_num) = child_num {
+            write!(f, "{:>3}: ", child_num)?;
+        }
+        if let Some((hash, node)) = trie {
+            let hash_prefix = &hash[0..std::cmp::min(hash.len(),4)];
+            let hash_str = to_hex::<false>(hash_prefix);
+            let node = node.borrow();
+            write!(f, "{} -> ", hash_str)?;
+            match &node.kind {
+                Kind::Leaf { value, .. } => {
+                    write!(f, "L({}, {:?})", to_bin::<false>(&node.key), value)
+                }
+                Kind::Branch(BranchData { mask, children }) => {
+                    write!(f, "B({}, {}, ", to_bin::<false>(&node.key), to_bin::<false>(&[*mask]))?;
+                    for (idx, child) in children.iter().enumerate() {
+                        write!(f, "\n")?;
+                        Self::debug_fmt(&child, depth+1, Some(idx), f)?;
+                    }
+                    write!(f, "\n{})", space)
+                }
+                Kind::Opaque(_hash, _marker) => write!(f, "O({})", hash_str)
+            }
+        } else {
+            if depth == 0 {
+                write!(f, "Trie(Empty)")
+            } else {
+                write!(f, "E")
             }
         }
     }
@@ -327,25 +363,36 @@ impl<T: Digestible, const N: usize, const K: usize, A: Allocator + Clone, H: Dig
         keys.dedup();
         let keys: Vec<_> = keys.into_iter().map(|k| (k, 0)).collect();
         let mut frontier = vec![(self, keys)];
+        let mut per_node_keys= HashMap::new();
+        let mut indices = Vec::with_capacity(K);
 
         // in this loop, we repeatedly prune nodes that are NOT in our frontier
         while frontier.len() != 0 {
             frontier = frontier.into_iter().flat_map(|(node, keys)| {
+                // clear existing per-iteration structs
+                per_node_keys.clear();
+                indices.clear();
 
                 // if this node is terminal, return immediately
                 if node.num_children().is_none() {
                     return vec![];
                 }
 
-                // for each key, find the keys that reach a particular child slot
-                let mut per_node_keys= HashMap::new();
+                // for each key, check whether that key can reach a particular child slot
+                // by running find with a zero-bound (disabling recursion into child nodes)
                 for (key, bits) in keys.into_iter() {
                     node.find(Some(0), key, BitPosition { index: 0, bits }, |_, res| {
                         match res {
+                            // this key reached a child slot, which means we must continue
+                            // to check whether this key exists in the tree or not by computing
+                            // a mapping from child slot -> key suffixes
                             FindResult::Bounded(p, _, slot) => {
                                 let keys: &mut Vec<_> = per_node_keys.entry(slot).or_default();
                                 keys.push((&key[p.index..], p.bits));
                             }
+                            // in any other case, we have determined concuslively
+                            // whether or not the key exists in the trie; no further
+                            // work is required for this key
                             _ => {}
                         }
                     })
@@ -359,13 +406,12 @@ impl<T: Digestible, const N: usize, const K: usize, A: Allocator + Clone, H: Dig
                 };
 
                 // prune unreached children and collect reachable child indices in a vector
-                let mut indices = Vec::with_capacity(K);
                 for idx in 0..K {
                     if per_node_keys.contains_key(&idx) {
                         indices.push(idx);
                     } else {
                         if let Some(Some((hash, child))) = children.get_mut(idx) {
-                            child.kind = Opaque(hash.clone(), ())
+                            child.kind = Kind::Opaque(hash.clone(), ())
                         }
                     }
                 }
@@ -375,7 +421,7 @@ impl<T: Digestible, const N: usize, const K: usize, A: Allocator + Clone, H: Dig
                 let local_frontier: Vec<_> = unsafe { pick_mut_unchecked(children, &indices) };
 
                 // finally, we expand the frontier vector for each child node
-                indices.into_iter().zip(local_frontier.into_iter()).map(|(child_idx, node)| {
+                indices.iter().zip(local_frontier.into_iter()).map(|(child_idx, node)| {
                     let node = &mut *node.as_mut().expect("Child node must exist for index").1;
                     let mut keys = per_node_keys.remove(&child_idx).expect("Cannot fail to locate existing index");
                     keys.sort();
@@ -393,6 +439,7 @@ mod witness_tests {
     use super::*;
     use allocator_api2::alloc::Global;
     use sha2::Sha256;
+    use test_log::test;
 
     type U64BinaryTrie = Trie<u64,4,2,Global,Sha256,Concrete>;
 
@@ -429,6 +476,13 @@ mod witness_tests {
 
     #[test]
     fn witness_shape() {
-        // TODO: add tests for shape of witness trie after minimization
+        let mut t: U64BinaryTrie = Trie::new();
+        t.set(&[1,2,3,], 42).unwrap();
+        println!("Orignal: {t:?}");
+        t.set(&[1,2,4,], 43).unwrap();
+        println!("Orignal: {t:?}");
+        let mut t = t.to_partial();
+        t.witness_for_keys(vec![&[1]]);
+        println!("Witness: {t:?}");
     }
 }
