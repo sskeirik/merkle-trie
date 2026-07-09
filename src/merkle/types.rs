@@ -54,6 +54,30 @@ pub(crate) enum Kind<T: Digestible, const N: usize, const K: usize, A: Allocator
 // A pair of a boxed node and its hash
 pub(crate) type HashNode<T, const N: usize, const K: usize, A, H, M> = (Output<H>, Box<Node<T,N,K,A,H,M>, A>);
 
+// implement opaque trie node partial type
+mod sealed { pub trait Mode {} }
+
+#[derive(Clone)]
+pub struct Concrete;
+#[derive(Clone)]
+pub struct Partial;
+impl sealed::Mode for Concrete {}
+impl sealed::Mode for Partial {}
+
+pub trait TrieMode: sealed::Mode {
+    /// Zero-sized tag for `Kind::Opaque`: uninhabited for `Concrete` (so the
+    /// variant can never be constructed), `()` for `Witness`.
+    type Marker: Clone;
+}
+
+impl TrieMode for Concrete {
+    type Marker = Infallible;
+}
+
+impl TrieMode for Partial {
+    type Marker = ();
+}
+
 /// Trait that describes how to update values in a Node.
 pub trait NodeUpdate<V> {
     /// a function that can update the value if it already exists.
@@ -85,28 +109,4 @@ impl<V> NodeUpdate<V> for SimpleUpdate<V> {
     fn on_vacant(self) -> Option<V> {
         Some(self.0)
     }
-}
-
-// implement opaque trie node partial type
-mod sealed { pub trait Mode {} }
-
-#[derive(Clone)]
-pub struct Concrete;
-#[derive(Clone)]
-pub struct Partial;
-impl sealed::Mode for Concrete {}
-impl sealed::Mode for Partial {}
-
-pub trait TrieMode: sealed::Mode {
-    /// Zero-sized tag for `Kind::Opaque`: uninhabited for `Concrete` (so the
-    /// variant can never be constructed), `()` for `Witness`.
-    type Marker: Clone;
-}
-
-impl TrieMode for Concrete {
-    type Marker = Infallible;
-}
-
-impl TrieMode for Partial {
-    type Marker = ();
 }
