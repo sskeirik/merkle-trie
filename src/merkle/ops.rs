@@ -202,33 +202,26 @@ impl<T: Digestible, const N: usize, const K: usize, A: Allocator + Clone, H: Dig
     }
 
     pub fn digest(&self) -> Output<H> {
-        let mut hasher = H::new();
-        if let Some(precomputed_digest) = self.digest_internal(&mut hasher) {
-            precomputed_digest
-        } else {
-            hasher.finalize()
-        }
-    }
-
-    fn digest_internal<D: Digest>(&self, hasher: &mut D) -> Option<Output<H>> {
         match &self.kind {
-            Kind::Opaque(hash, _marker) => Some(hash.clone()),
+            Kind::Opaque(hash, _marker) => hash.clone(),
             Kind::Leaf { value, .. } => {
-                Digest::update(hasher, &self.key);
-                value.digest_update(hasher);
-                None
+                let mut hasher = H::new();
+                Digest::update(&mut hasher, &self.key);
+                value.digest_update(&mut hasher);
+                hasher.finalize()
             }
             Kind::Branch(BranchData { mask, children }) => {
-                Digest::update(hasher, &self.key);
-                Digest::update(hasher, [*mask]);
+                let mut hasher = H::new();
+                Digest::update(&mut hasher, &self.key);
+                Digest::update(&mut hasher, [*mask]);
                 for child in children {
                     if let Some((hash, _)) = child {
-                        Digest::update(hasher, hash);
+                        Digest::update(&mut hasher, hash);
                     } else {
-                        Digest::update(hasher, empty_hash::<H>());
+                        Digest::update(&mut hasher, empty_hash::<H>());
                     }
                 }
-                None
+                hasher.finalize()
             }
         }
     }
