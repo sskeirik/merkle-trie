@@ -8,8 +8,9 @@ use crate::merkle::types::{TrieMode, Node, NodeUpdate, Kind, BranchData};
 use crate::merkle::types::mode::*;
 use crate::utils::{Allocator, Box, pick_mut_unchecked};
 use crate::bitseqops::{BitDiff, BitPosition, BitSeqOps, find_first_distinct_bits};
-#[allow(unused_imports)] // debugging
+#[allow(unused_imports)] // debugging or doc-comments
 use {
+    crate::merkle::types::Trie,
     tracing::{instrument, debug},
     crate::trace_val,
     crate::utils::{to_ascii, to_bin, to_hex},
@@ -106,8 +107,7 @@ impl<T: Digestible, const N: usize, const K: usize, A: Allocator + Clone, H: Dig
         result
     }
 
-    /// Given key_suffix, find existing descendant node that matches key_suffix and set its value to new_value
-    /// otherwise, if matching descendant node does not exist, create one and set its value to new_value
+    /// The internal implementation of [`Trie::update`] as a thin wrapper around `Self::probe_mut`.
     pub fn update<U: NodeUpdate<T>>(&mut self, hash: Option<&mut Output<H>>, target_key: &[u8], updater: U, alloc: A) -> Result<(), &'static str> {
         use Kind::*;
         use ProbeResult::*;
@@ -145,8 +145,8 @@ impl<T: Digestible, const N: usize, const K: usize, A: Allocator + Clone, H: Dig
                     let inserted_leaf = Self::new_leaf(inserted_leaf_key, new_value);
                     evicted.key = new_existing_key;
                     unsafe {
-                        installed_branch.raw_set_child(new_existing_slot, evicted, None, alloc.clone())?;
-                        installed_branch.raw_set_child(inserted_leaf_slot, inserted_leaf, None, alloc.clone())?;
+                        installed_branch.raw_set_child(new_existing_slot, evicted, alloc.clone())?;
+                        installed_branch.raw_set_child(inserted_leaf_slot, inserted_leaf, alloc.clone())?;
                     }
                     Ok(())
                 }
@@ -157,6 +157,7 @@ impl<T: Digestible, const N: usize, const K: usize, A: Allocator + Clone, H: Dig
         self.probe_mut(None, hash, target_key, BitPosition { index: 0, bits: 0 }, action)
     }
 
+    /// The internal implementation of [`Trie::get`] as a thin wrapper around `Self::probe`.
     pub fn get<'a>(&'a self, search_key: &[u8]) -> Option<&'a T> {
         use ProbeResult::*;
         let action = |_pos, result: ProbeResult<&'a Self, &'a BranchData<T,N,K,A,H,M>>| {
@@ -169,48 +170,50 @@ impl<T: Digestible, const N: usize, const K: usize, A: Allocator + Clone, H: Dig
         self.probe(None, search_key, BitPosition { index: 0, bits: 0 }, action)
     }
 
-    pub(crate) fn new_branch(key: Box<[u8],A>, mask: u8) -> Node<T,N,K,A,H,M> {
-        Node { key, kind: Kind::Branch(BranchData { mask, children: [const { None }; K] })}
+    /// Constructs a new branch node for this trie
+    pub(crate) fn new_branch(key: Box<[u8],A>, mask: u8) -> Self {
+        Self { key, kind: Kind::Branch(BranchData { mask, children: [const { None }; K] })}
     }
 
-    pub(crate) fn new_leaf(key: Box<[u8],A>, value: T) -> Node<T,N,K,A,H,M> {
-        Node { key, kind: Kind::Leaf { value, _phantom: std::marker::PhantomData }}
+    /// Constructs a new leaf node for this trie
+    pub(crate) fn new_leaf(key: Box<[u8],A>, value: T) -> Self {
+        Self { key, kind: Kind::Leaf { value, _phantom: std::marker::PhantomData }}
     }
 
-    /// Sets a child on this node which must be a branch
+    /// Upserts a child node into the current node at the given slot.
     /// 
-    /// SAFTEY: must ensure caller is a branch
+    /// SAFTEY: must ensure caller node has [`Kind::Branch`].
     #[inline]
-    unsafe fn raw_set_child(&mut self, idx: usize, node: Self, hash: Option<Output<H>>, alloc: A) -> Result<(), &'static str> {
-        let hash = hash.unwrap_or(node.digest());
+    unsafe fn raw_set_child(&mut self, idx: usize, node: Self, alloc: A) -> Result<(), &'static str> {
+        let digest = node.digest();
         let node = Box::new_in(node, alloc);
         match &mut self.kind {
-            Kind::Branch(BranchData { children, .. }) => children[idx] = Some((hash, node)),
+            Kind::Branch(BranchData { children, .. }) => children[idx] = Some((digest, node)),
             // SAFETY: by assumption
             Kind::Leaf { .. } | Kind::Opaque(..) => unsafe { std::hint::unreachable_unchecked() },
         };
         Ok(())
     }
     
-    /// returns number of bits in node key
-    /// for a branch, this is all of the bits in the prefix, excluding all bits in its final byte that overlap/succeed the diff
-    /// for a leaf, this is all of the bits in its key
+    /// Return the number of bits which participate in key comparisons against this node.
+    /// 
+    /// For [`Kind::Branch`] or [`Kind::Opaque`] nodes, this is just all bits in the key.
+    /// For [`Kind::Branch`] nodes, perform the same calculation but subtract all bits in the final byte that overlap/succeed the mask.
     #[inline]
     fn get_key_bits(&self) -> usize {
-        let mask_0s = match self.kind {
-            Kind::Branch(BranchData{ mask, .. }) => mask.trailing_zeros(),
-            Kind::Leaf { .. } | Kind::Opaque(..) => 8,
+        let extra_bits = match self.kind {
+            Kind::Branch(BranchData{ mask, .. }) => 8 - mask.trailing_zeros(),
+            Kind::Leaf { .. } | Kind::Opaque(..) => 0
         };
-        ((self.key.len()+1) * 8) - mask_0s as usize
+        self.key.len()*8 - extra_bits as usize
     }
 
-    pub fn num_children(&self) -> Option<usize> {
-        match &self.kind {
-            Kind::Branch(BranchData { children , .. }) => Some(children.len()),
-            _ => None
-        }
+    /// Returns the number of children stored under this node
+    pub fn is_terminal(&self) -> bool {
+        matches!(self.kind, Kind::Branch(_))
     }
 
+    /// The internal implementation of [`Trie::digest`] that only requires examining the local node.
     pub fn digest(&self) -> Output<H> {
         match &self.kind {
             Kind::Opaque(hash, _marker) => hash.clone(),
@@ -236,6 +239,7 @@ impl<T: Digestible, const N: usize, const K: usize, A: Allocator + Clone, H: Dig
         }
     }
 
+    /// Generates a short node label for debugging purposes
     fn debug_label(&self) -> String {
         match &self.kind {
             Kind::Leaf { .. } => format!("L({},*)", to_bin::<false>(&self.key)),
@@ -250,6 +254,7 @@ impl<T: Digestible, const N: usize, const K: usize, A: Allocator + Clone, H: Dig
 }
 
 impl<T: Digestible + Debug, const N: usize, const K: usize, A: Allocator + Clone, H: Digest, M: TrieMode> Node<T,N,K,A,H,M> {
+    /// This function drives the [`Debug`] implementation for [`Trie`].
     pub(crate) fn debug_fmt(trie: &Option<(Output<H>, impl Borrow<Node<T,N,K,A,H,M>>)>, depth: usize, child_num: Option<usize>, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let space = " ".repeat(depth*2);
         write!(f, "{}", space)?;
@@ -286,6 +291,7 @@ impl<T: Digestible + Debug, const N: usize, const K: usize, A: Allocator + Clone
 }
 
 impl<T: Digestible, const N: usize, const K: usize, A: Allocator + Clone, H: Digest> Node<T,N,K,A,H,Complete> {
+    /// The internal implementation of [`Trie::to_partial`]
     pub fn to_partial(self) -> Node<T,N,K,A,H,Partial> {
         // SAFETY: Kind is #[repr(C, u8)] and Node/BranchData are #[repr(C)], and the
         // only field whose type varies with the mode (`Kind::Opaque`'s second field,
@@ -310,8 +316,8 @@ impl<T: Digestible, const N: usize, const K: usize, A: Allocator + Clone, H: Dig
     }
 }
 
-// We need to build a frontier with a set of key fragments attached to it and gradually expand that frontier
 impl<T: Digestible, const N: usize, const K: usize, A: Allocator + Clone, H: Digest> Node<T,N,K,A,H,Partial> {
+    /// The internal implementation of [`Trie::witness_for_keys`]
     pub fn witness_for_keys(&mut self, mut keys: Vec<&[u8]>) {
         keys.sort();
         keys.dedup();
@@ -323,14 +329,12 @@ impl<T: Digestible, const N: usize, const K: usize, A: Allocator + Clone, H: Dig
         // in this loop, we repeatedly prune nodes that are NOT in our frontier
         while frontier.len() != 0 {
             frontier = frontier.into_iter().flat_map(|(node, keys)| {
-                // clear existing per-iteration structs
-                per_node_keys.clear();
-                indices.clear();
-
-                // if this node is terminal, return immediately
-                if node.num_children().is_none() {
+                // initial setup
+                if node.is_terminal() {
                     return vec![];
                 }
+                per_node_keys.clear();
+                indices.clear();
 
                 // for each key, check whether that key can reach a particular child slot
                 // by running find with a zero-bound (disabling recursion into child nodes)
