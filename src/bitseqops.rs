@@ -1,8 +1,10 @@
 use std::fmt::Debug;
-use tracing::instrument;
 use crate::utils::{Allocator, Box, copy_slice_into_box};
 #[allow(unused_imports)] // used for debug purposes
-use crate::utils::{to_ascii, to_bin, to_hex};
+use {
+    tracing::instrument,
+    crate::utils::{to_ascii, to_bin, to_hex},
+};
 
 #[inline]
 pub(crate) fn isolate_prefix_mask(bits: usize) -> u8 {
@@ -35,26 +37,6 @@ pub(crate) fn tz_mask(mask: u8) -> u8 {
     }
 }
 
-// FIXME: inline this if we never need it anywhere else
-/// Isolate bits in the last byte that precede the mask
-/// Return the original byte
-#[inline]
-pub(crate) fn stamp_prefix(prefix: &mut [u8], mask: u8) -> u8 {
-    let orig = prefix[prefix.len() - 1];
-    prefix[prefix.len() - 1] = orig & tz_mask(mask);
-    orig
-}
-
-// FIXME: inline this if we never need it anywhere else
-/// Isolate bits in the first byte that succeed the mask
-/// Return the original byte
-#[inline]
-pub(crate) fn stamp_suffix(suffix: &mut [u8], mask: u8) -> u8 {
-    let orig = suffix[0];
-    suffix[0] = orig & lz_mask(mask);
-    orig
-}
-
 /// Encodes a bit position in a byte string
 #[derive(Default)]
 pub struct BitPosition {
@@ -70,22 +52,17 @@ impl Debug for BitPosition {
     }
 }
 
-/// Encodes a fixed length diff (sequence of log2(K) bits,
-/// aligned to a log2(K) bit boundary, always wholly contained in a single byte)
+/// Encodes the location of the first bit that distinguishes two bit strings
 #[derive(Debug)]
 pub struct BitDiff {
-    /// encodes the diff location
+    /// The first bit position that distinguishes two bitstrings
     pub pos: BitPosition,
-    /// whether this diff is a prefix and which input was the prefix
+    /// Marker that records whether one bitstring is a prefix of the other
     pub prefix: Option<usize>,
 }
 
-// Inputs: a, b: &[u8]           - buffers that contain bit strings
-//         offset: u16           - shared offset that defines the start of each bit string
-//         a_bits, b_bits: usize - the length of each bit string in bits
-//
-// Output: The index of the first bit sequence of size log2(K), aligned on a log2(K) bit offset, that contains a distinct bit.
-//         If one bit string is a prefix of the other, the extra bits are considered to be distinct.
+/// Returns the index of the first bit, after the offset bits, that distinguishes the two input strings.
+/// If one bit string is a prefix of the other, the extra bits are considered to be distinct.
 pub fn find_first_distinct_bits(a: &[u8], b: &[u8], offset: usize, a_bits: Option<usize>, b_bits: Option<usize>) -> Option<BitDiff> {
 
     // set default length
@@ -164,18 +141,27 @@ pub fn find_first_distinct_bits(a: &[u8], b: &[u8], offset: usize, a_bits: Optio
 }
 
 impl BitDiff {
+    /// Given a bit diff, find the unique bitmask of length log2(K),
+    /// aligned on a log2(K) bit offset, that contains diff.bits
     pub fn mask<const K: usize>(&self) -> u8 {
         BitSeqOps::<K>::mask(self.pos.bits)
     }
 
-    pub fn slot<const K: usize>(&self, src: &[u8]) -> usize {
+    /// Given a bit diff and src buffer, find the unique
+    /// [0, 2^K)-valued integer obtained from applying the
+    /// diff-derived bitmask to src at the diff's position
+    pub fn mask_value<const K: usize>(&self, src: &[u8]) -> usize {
         BitSeqOps::<K>::mask_value(src, self.pos.index, self.pos.bits)
     }
 
+    /// Given a bit diff and src bitstring, copy the bits from src in the range [0,align(log2(K),diff.pos)).
+    /// In order to account for non-byte-aligned bitlengths, we write an extra final byte.
+    /// Any bits in this final byte which are not contained in the prefix will be zeroed out.
     pub fn write_prefix<const K: usize, A: Allocator + Clone>(&self, src: &[u8], alloc: A) -> Box<[u8], A> {
         BitSeqOps::<K>::write_aligned_prefix(self, src, alloc)
     }
 
+    /// Given a bit diff and src bitstring, copy the bits from src in the range [align(log2(K),diff.pos),src.len()*8).
     pub fn write_suffix<const K: usize, A: Allocator + Clone>(&self, src: &[u8], alloc: A) -> Box<[u8], A> {
         BitSeqOps::<K>::write_aligned_suffix(&self.pos, src, alloc)
     }
@@ -192,17 +178,17 @@ impl<const K: usize> BitSeqOps<K> {
     /// The mask (before shifting) used to extract the bit string which defines the split
     const CHUNK_MASK: u8 = (K - 1) as u8;
 
+    /// Given a bit offset in a byte, find the unique bitmask of length log2(K),
+    /// aligned on a log2(K) bit offset, that contains the bit offset
     #[inline]
     pub fn mask(bit_index: usize) -> u8 {
         debug_assert!(bit_index < 8, "Invalid bit index");
         Self::CHUNK_MASK << ((bit_index / Self::K_BITS) * Self::K_BITS)
     }
 
-    #[inline]
-    pub fn mask_end_index(bit_index: usize) -> usize {
-        8 - Self::mask(bit_index).leading_zeros() as usize
-    }
-
+    /// Given a src buffer, a byte index, and a bit offset, find the
+    /// unique [0, 2^K)-valued integer obtained from applying the
+    /// offset-derived bitmask to src[index]
     #[inline]
     pub fn mask_value(src: &[u8], index: usize, bit_index: usize) -> usize {
         let mask = Self::mask(bit_index);
@@ -210,32 +196,20 @@ impl<const K: usize> BitSeqOps<K> {
         value as usize
     }
 
-    /// Given a bit diff and an input buffer, write out the processed prefix/suffix
-    ///
-    /// Inputs: diff - the bit diff between two strings a and b
-    ///         src - buffer that contains the bit diff
-    ///         dst - the buffer where the suffix is written
-    ///
-    /// Output: subslice of dst that contains the prefix
+    /// Given a bit diff and src bitstring, copy the bits from src in the range [0,align(log2(K),diff.pos)).
+    /// In order to account for non-byte-aligned bitlengths, we write an extra final byte.
     #[instrument(level="debug", skip_all)]
     pub fn write_aligned_prefix<A: Allocator + Clone>(diff: &BitDiff, src: &[u8], alloc: A) -> Box<[u8],A> {
         debug_assert!(diff.prefix.is_none(), "this operation is invalid for bitstrings without a diff");
         let BitDiff { pos: BitPosition { index, bits, }, .. } = diff;
-        // since there are diff bits in the final byte, we must include it
-        let prefix_len = index + 1;
-        let mut dst = copy_slice_into_box(&src[..prefix_len], alloc);
+        // since there may be diff bits in the final byte, we must include it
+        let mut dst = copy_slice_into_box(&src[..index+1], alloc);
         // we isolate the bits that precede the diff
-        stamp_prefix(&mut dst, Self::mask(*bits));
+        dst[*index] &= tz_mask(Self::mask(*bits));
         dst
     }
 
-    /// Given a bit diff and an input buffer, write out the processed prefix/suffix
-    ///
-    /// Inputs: diff - the bit diff between two strings a and b
-    ///         src - buffer that contains the bit diff
-    ///         dst - the buffer where the suffix is written
-    ///
-    /// Output: subslice of dst that contains the suffix
+    /// Given a bit diff and src bitstring, copy the bits from src in the range [align(log2(K),diff.pos),src.len()*8).
     #[instrument(level="debug", skip_all)]
     pub fn write_aligned_suffix<A: Allocator + Clone>(pos: &BitPosition, src: &[u8], alloc: A) -> Box<[u8],A> {
         let suffix_len = src.len() - pos.index;
@@ -244,7 +218,7 @@ impl<const K: usize> BitSeqOps<K> {
         }
         let mut dst = copy_slice_into_box(&src[pos.index..], alloc);
         // we isolate the bits that succeed the diff
-        stamp_suffix(&mut dst, Self::mask(pos.bits));
+        dst[0] &= lz_mask(Self::mask(pos.bits));
         dst
     }
 }

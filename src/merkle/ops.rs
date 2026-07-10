@@ -34,7 +34,7 @@ impl<T: Digestible, const N: usize, const K: usize, A: Allocator + Clone, H: Dig
 
         match (&self.kind, split.prefix) {
             (Kind::Branch(branch), Some(1)) => {
-                let slot = split.slot::<K>(key);
+                let slot = split.mask_value::<K>(key);
                 if let Some((_hash, child)) = branch.children[slot].as_ref() {
                     match bound {
                         Some(0) => {
@@ -69,7 +69,7 @@ impl<T: Digestible, const N: usize, const K: usize, A: Allocator + Clone, H: Dig
 
         let result = match (&mut self.kind, split.prefix) {
             (Kind::Branch(branch), Some(1)) => {
-                let slot = split.slot::<K>(key);
+                let slot = split.mask_value::<K>(key);
                 if let Some((hash, child)) = branch.children[slot].as_mut() {
                     match bound {
                         Some(0) => {
@@ -125,8 +125,8 @@ impl<T: Digestible, const N: usize, const K: usize, A: Allocator + Clone, H: Dig
                     let new_branch_key = split.write_prefix::<K,A>(&existing.key, alloc.clone());
                     let new_existing_key = split.write_suffix::<K,A>(&existing.key, alloc.clone());
                     let inserted_leaf_key = split.write_suffix::<K,A>(target_key, alloc.clone());
-                    let new_existing_slot = split.slot::<K>(&existing.key);
-                    let inserted_leaf_slot = split.slot::<K>(target_key);
+                    let new_existing_slot = split.mask_value::<K>(&existing.key);
+                    let inserted_leaf_slot = split.mask_value::<K>(target_key);
                     // evict existing, install new branch
                     let new_branch = Self::new_branch(new_branch_key, split.mask::<K>());
                     let mut evicted = std::mem::replace(existing, new_branch);
