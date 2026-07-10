@@ -27,13 +27,11 @@ impl<T: Digestible, const N: usize, const K: usize, A: Allocator + Clone, H: Dig
     pub(crate) fn find<'a, R>(&'a self, mut bound: Option<usize>, key: &[u8], pos: BitPosition, action: impl FnOnce(BitPosition, FindResult<&'a Self, &'a BranchData<T,N,K,A,H,M>>) -> R) -> R {
         let label = if cfg!(debug_assertions) { self.debug_label() } else { const { String::new() } };
 
-        // if keys are identical, return current node and lack of diff
         let Some(split) = find_first_distinct_bits(&key[pos.index..], &self.key, pos.bits, None, Some(self.get_key_bits())) else {
             debug!("For {}, exact match found at node {}", to_ascii(key), label);
             return action(pos, FindResult::ExactMatch(self))
         };
 
-        // otherwise, check if we can explore a subtrie
         match (&self.kind, split.prefix) {
             (Kind::Branch(branch), Some(1)) => {
                 let slot = split.slot::<K>(key);
@@ -64,13 +62,11 @@ impl<T: Digestible, const N: usize, const K: usize, A: Allocator + Clone, H: Dig
     pub(crate) fn find_mut<R>(&mut self, mut bound: Option<usize>, hash: Option<&mut Output<H>>, key: &[u8], pos: BitPosition, action: impl for <'a> FnOnce(BitPosition, FindResult<&'a mut Self, &'a mut BranchData<T,N,K,A,H,M>>) -> R) -> R {
         let label = if cfg!(debug_assertions) { self.debug_label() } else { const { String::new() } };
 
-        // if keys are identical, return current node and lack of diff
         let Some(split) = find_first_distinct_bits(&key[pos.index..], &self.key, pos.bits, None, Some(self.get_key_bits())) else {
             debug!("For {}, exact match found at node {}", to_ascii(key), label);
             return action(pos, FindResult::ExactMatch(self))
         };
 
-        // otherwise, check if we can explore a subtrie
         let result = match (&mut self.kind, split.prefix) {
             (Kind::Branch(branch), Some(1)) => {
                 let slot = split.slot::<K>(key);
@@ -102,15 +98,15 @@ impl<T: Digestible, const N: usize, const K: usize, A: Allocator + Clone, H: Dig
 
     /// Given key_suffix, find existing descendant node that matches key_suffix and set its value to new_value
     /// otherwise, if matching descendant node does not exist, create one and set its value to new_value
-    pub fn update<U: NodeUpdate<T>>(&mut self, hash: Option<&mut Output<H>>, search_key: &[u8], updater: U, alloc: A) -> Result<(), &'static str> {
+    pub fn update<U: NodeUpdate<T>>(&mut self, hash: Option<&mut Output<H>>, target_key: &[u8], updater: U, alloc: A) -> Result<(), &'static str> {
         use Kind::*;
         use FindResult::*;
         let action = move |pos: BitPosition, find_result: FindResult<&mut Self, &mut BranchData<T,N,K,A,H,M>>| {
             match find_result {
                 EmptySlot(branch, slot) => {
                     if let Some(value) = updater.on_vacant() {
-                        let key = BitSeqOps::<K>::write_aligned_suffix::<A>(&pos, search_key, alloc.clone());
-                        let leaf = Self { key, kind: Kind::Leaf { value, _phantom: std::marker::PhantomData }};
+                        let key = BitSeqOps::<K>::write_aligned_suffix::<A>(&pos, target_key, alloc.clone());
+                        let leaf = Self::new_leaf(key, value);
                         branch.children[slot] = Some((leaf.digest(), Box::new_in(leaf, alloc.clone())));
                         Ok(())
                     } else {
@@ -118,37 +114,38 @@ impl<T: Digestible, const N: usize, const K: usize, A: Allocator + Clone, H: Dig
                     }
                 }
                 ExactMatch(Node { kind: Leaf { value, .. }, .. }) => Ok(updater.on_occupied(value)),
-                Disagreement(curr, split) => {
+                Disagreement(existing, split) => {
                     if split.prefix.is_some() {
                         return Err("Cannot set a value on a prefix");
                     }
-                    let Some(value) = updater.on_vacant() else {
+                    let Some(new_value) = updater.on_vacant() else {
                         return Err("Cannot create leaf with null initializer")
                     };
-                    let mut children = [const { None }; K];
-                    // create new leaf node for search_key and new_value
-                    let new_child = Self { key: split.write_suffix::<K,A>(search_key, alloc.clone()), kind: Kind::Leaf { value, _phantom: std::marker::PhantomData } };
-                    // debug!("new leaf: {}", new_child.dump_metadata());
-                    // set up children array
-                    children[split.slot::<K>(&search_key)] = Some((new_child.digest(), Box::new_in(new_child, alloc.clone())));
-                    // update existing node memory with new branch
-                    let new_branch = Self { key: split.write_prefix::<K,A>(&curr.key, alloc.clone()), kind: Kind::Branch(BranchData { mask: split.mask::<K>(), children }) };
-                    // debug!("new branch: {}, old node: {}", new_branch.dump_metadata(), curr_node.dump_metadata());
-                    let old_curr_slot = split.slot::<K>(&curr.key);
-                    let old_curr_key = split.write_suffix::<K,A>(&curr.key, alloc.clone());
-                    let mut old_curr = std::mem::replace(curr, new_branch);
-                    // update old_self's key and make it a child of the current self (a branch)
-                    old_curr.key = old_curr_key;
-                    unsafe { curr.raw_set_child(old_curr_slot, old_curr, None, alloc.clone())? };
+                    // create keys/slots for to to-be-installed branch
+                    let new_branch_key = split.write_prefix::<K,A>(&existing.key, alloc.clone());
+                    let new_existing_key = split.write_suffix::<K,A>(&existing.key, alloc.clone());
+                    let inserted_leaf_key = split.write_suffix::<K,A>(target_key, alloc.clone());
+                    let new_existing_slot = split.slot::<K>(&existing.key);
+                    let inserted_leaf_slot = split.slot::<K>(target_key);
+                    // evict existing, install new branch
+                    let new_branch = Self::new_branch(new_branch_key, split.mask::<K>());
+                    let mut evicted = std::mem::replace(existing, new_branch);
+                    let installed_branch = existing;
+                    // ready nodes for insertion
+                    let inserted_leaf = Self::new_leaf(inserted_leaf_key, new_value);
+                    evicted.key = new_existing_key;
+                    unsafe {
+                        installed_branch.raw_set_child(new_existing_slot, evicted, None, alloc.clone())?;
+                        installed_branch.raw_set_child(inserted_leaf_slot, inserted_leaf, None, alloc.clone())?;
+                    }
                     Ok(())
                 }
                 Bounded(..) => unreachable!("Bound not set"),
                 _ => Err("Unsupported trie set")
             }
         };
-        self.find_mut(None, hash, search_key, BitPosition { index: 0, bits: 0 }, action)
+        self.find_mut(None, hash, target_key, BitPosition { index: 0, bits: 0 }, action)
     }
-
 
     pub fn get<'a>(&'a self, search_key: &[u8]) -> Option<&'a T> {
         use FindResult::*;
@@ -162,19 +159,16 @@ impl<T: Digestible, const N: usize, const K: usize, A: Allocator + Clone, H: Dig
         self.find(None, search_key, BitPosition { index: 0, bits: 0 }, action)
     }
 
-    /// returns number of bits in node key
-    /// for a branch, this is all of the bits in the prefix, excluding all bits in its final byte that overlap/succeed the diff
-    /// for a leaf, this is all of the bits in its key
-    #[inline]
-    fn get_key_bits(&self) -> usize {
-        let mask_0s = match self.kind {
-            Kind::Branch(BranchData{ mask, .. }) => mask.trailing_zeros(),
-            Kind::Leaf { .. } | Kind::Opaque(..) => 8,
-        };
-        ((self.key.len()+1) * 8) - mask_0s as usize
+    pub(crate) fn new_branch(key: Box<[u8],A>, mask: u8) -> Node<T,N,K,A,H,M> {
+        Node { key, kind: Kind::Branch(BranchData { mask, children: [const { None }; K] })}
+    }
+
+    pub(crate) fn new_leaf(key: Box<[u8],A>, value: T) -> Node<T,N,K,A,H,M> {
+        Node { key, kind: Kind::Leaf { value, _phantom: std::marker::PhantomData }}
     }
 
     /// Sets a child on this node which must be a branch
+    /// 
     /// SAFTEY: must ensure caller is a branch
     #[inline]
     unsafe fn raw_set_child(&mut self, idx: usize, node: Self, hash: Option<Output<H>>, alloc: A) -> Result<(), &'static str> {
@@ -188,6 +182,18 @@ impl<T: Digestible, const N: usize, const K: usize, A: Allocator + Clone, H: Dig
         Ok(())
     }
     
+    /// returns number of bits in node key
+    /// for a branch, this is all of the bits in the prefix, excluding all bits in its final byte that overlap/succeed the diff
+    /// for a leaf, this is all of the bits in its key
+    #[inline]
+    fn get_key_bits(&self) -> usize {
+        let mask_0s = match self.kind {
+            Kind::Branch(BranchData{ mask, .. }) => mask.trailing_zeros(),
+            Kind::Leaf { .. } | Kind::Opaque(..) => 8,
+        };
+        ((self.key.len()+1) * 8) - mask_0s as usize
+    }
+
     pub fn num_children(&self) -> Option<usize> {
         match &self.kind {
             Kind::Branch(BranchData { children , .. }) => Some(children.len()),

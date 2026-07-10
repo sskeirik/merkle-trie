@@ -1,5 +1,4 @@
 use std::fmt::Debug;
-use digest::typenum::Bit;
 use tracing::instrument;
 use crate::utils::{Allocator, Box, copy_slice_into_box};
 #[allow(unused_imports)] // used for debug purposes
