@@ -15,22 +15,30 @@ use {
     crate::utils::{to_ascii, to_bin, to_hex},
 };
 
-pub(crate) enum FindResult<N,B> {
+/// Represents why a probe result terminated
+pub(crate) enum ProbeResult<N,B> {
+    /// An exact match for the probe key was found at N
     ExactMatch(N),
+    /// An empty child slot corresponding to the probe key was found at B
     EmptySlot(B, usize),
+    /// A disagreement between the probe key and an existing node key was found at N
     Disagreement(N, BitDiff),
+    /// An empty child slot corresponding to the probe key was found
+    /// but could not be explored due to a depth bound due to the depth bound
+    /// being reached
     Bounded(BitPosition, N, usize),
 }
 
 impl<T: Digestible, const N: usize, const K: usize, A: Allocator + Clone, H: Digest, M: TrieMode> Node<T,N,K,A,H,M> {
 
+    /// Probes the trie, optionally with a bound, applying a user-specified action when the probe terminates
     #[instrument(level="debug", skip(self, bound, key, action))]
-    pub(crate) fn find<'a, R>(&'a self, mut bound: Option<usize>, key: &[u8], pos: BitPosition, action: impl FnOnce(BitPosition, FindResult<&'a Self, &'a BranchData<T,N,K,A,H,M>>) -> R) -> R {
+    pub(crate) fn probe<'a, R>(&'a self, mut bound: Option<usize>, key: &[u8], pos: BitPosition, action: impl FnOnce(BitPosition, ProbeResult<&'a Self, &'a BranchData<T,N,K,A,H,M>>) -> R) -> R {
         let label = if cfg!(debug_assertions) { self.debug_label() } else { const { String::new() } };
 
         let Some(split) = find_first_distinct_bits(&key[pos.index..], &self.key, pos.bits, None, Some(self.get_key_bits())) else {
             debug!("For {}, exact match found at node {}", to_ascii(key), label);
-            return action(pos, FindResult::ExactMatch(self))
+            return action(pos, ProbeResult::ExactMatch(self))
         };
 
         match (&self.kind, split.prefix) {
@@ -40,32 +48,33 @@ impl<T: Digestible, const N: usize, const K: usize, A: Allocator + Clone, H: Dig
                     match bound {
                         Some(0) => {
                             debug!("For {}, search bound hit at node {}", to_ascii(key), label);
-                            return action(pos, FindResult::Bounded(split.pos, self, slot))
+                            return action(pos, ProbeResult::Bounded(split.pos, self, slot))
                         }
                         Some(ref mut n) => *n -= 1,
                         _ => {}
                     };
-                    child.find(bound, key, split.pos, action)
+                    child.probe(bound, key, split.pos, action)
                 } else {
                     debug!("For {}, empty slot found at branch {}", to_ascii(key), label);
-                    action(pos, FindResult::EmptySlot(branch,slot))
+                    action(pos, ProbeResult::EmptySlot(branch,slot))
                 }
             },
             // no subtrie to explore, return
             _ => {
                 debug!("For {}, disagreement {split:?} found at node {}", to_ascii(key), self.debug_label());
-                action(pos, FindResult::Disagreement(self, split))
+                action(pos, ProbeResult::Disagreement(self, split))
             }
         }
     }
 
+    /// Probes the trie mutably, optionally with a bound, applying a user-specified action when the probe terminates that may modify the trie
     #[instrument(level="debug", skip(self, bound, key, action))]
-    pub(crate) fn find_mut<R>(&mut self, mut bound: Option<usize>, hash: Option<&mut Output<H>>, key: &[u8], pos: BitPosition, action: impl for <'a> FnOnce(BitPosition, FindResult<&'a mut Self, &'a mut BranchData<T,N,K,A,H,M>>) -> R) -> R {
+    pub(crate) fn probe_mut<R>(&mut self, mut bound: Option<usize>, hash: Option<&mut Output<H>>, key: &[u8], pos: BitPosition, action: impl for <'a> FnOnce(BitPosition, ProbeResult<&'a mut Self, &'a mut BranchData<T,N,K,A,H,M>>) -> R) -> R {
         let label = if cfg!(debug_assertions) { self.debug_label() } else { const { String::new() } };
 
         let Some(split) = find_first_distinct_bits(&key[pos.index..], &self.key, pos.bits, None, Some(self.get_key_bits())) else {
             debug!("For {}, exact match found at node {}", to_ascii(key), label);
-            return action(pos, FindResult::ExactMatch(self))
+            return action(pos, ProbeResult::ExactMatch(self))
         };
 
         let result = match (&mut self.kind, split.prefix) {
@@ -75,21 +84,21 @@ impl<T: Digestible, const N: usize, const K: usize, A: Allocator + Clone, H: Dig
                     match bound {
                         Some(0) => {
                             debug!("For {}, search bound hit at node {}", to_ascii(key), label);
-                            return action(pos, FindResult::Bounded(split.pos, self, slot))
+                            return action(pos, ProbeResult::Bounded(split.pos, self, slot))
                         }
                         Some(ref mut n) => *n -= 1,
                         _ => {}
                     };
-                    child.find_mut(bound, Some(hash), key, split.pos, action)
+                    child.probe_mut(bound, Some(hash), key, split.pos, action)
                 } else {
                     debug!("For {}, empty slot found at branch {}", to_ascii(key), label);
-                    action(pos, FindResult::EmptySlot(branch, slot))
+                    action(pos, ProbeResult::EmptySlot(branch, slot))
                 }
             },
             // no subtrie to explore, return
             _ => {
                 debug!("For {}, disagreement {split:?} found at node {}", to_ascii(key), label);
-                action(pos, FindResult::Disagreement(self, split))
+                action(pos, ProbeResult::Disagreement(self, split))
             }
         };
         // fixup our hash if we have one
@@ -101,8 +110,8 @@ impl<T: Digestible, const N: usize, const K: usize, A: Allocator + Clone, H: Dig
     /// otherwise, if matching descendant node does not exist, create one and set its value to new_value
     pub fn update<U: NodeUpdate<T>>(&mut self, hash: Option<&mut Output<H>>, target_key: &[u8], updater: U, alloc: A) -> Result<(), &'static str> {
         use Kind::*;
-        use FindResult::*;
-        let action = move |pos: BitPosition, find_result: FindResult<&mut Self, &mut BranchData<T,N,K,A,H,M>>| {
+        use ProbeResult::*;
+        let action = move |pos: BitPosition, find_result: ProbeResult<&mut Self, &mut BranchData<T,N,K,A,H,M>>| {
             match find_result {
                 EmptySlot(branch, slot) => {
                     if let Some(value) = updater.on_vacant() {
@@ -145,19 +154,19 @@ impl<T: Digestible, const N: usize, const K: usize, A: Allocator + Clone, H: Dig
                 _ => Err("Unsupported trie set")
             }
         };
-        self.find_mut(None, hash, target_key, BitPosition { index: 0, bits: 0 }, action)
+        self.probe_mut(None, hash, target_key, BitPosition { index: 0, bits: 0 }, action)
     }
 
     pub fn get<'a>(&'a self, search_key: &[u8]) -> Option<&'a T> {
-        use FindResult::*;
-        let action = |_pos, result: FindResult<&'a Self, &'a BranchData<T,N,K,A,H,M>>| {
+        use ProbeResult::*;
+        let action = |_pos, result: ProbeResult<&'a Self, &'a BranchData<T,N,K,A,H,M>>| {
             match result {
                 ExactMatch(Node { kind: Kind::Leaf { value, .. }, .. }) => Some(value),
                 Bounded(..) => unreachable!("Bound not set"),
                 _ => None,
             }
         };
-        self.find(None, search_key, BitPosition { index: 0, bits: 0 }, action)
+        self.probe(None, search_key, BitPosition { index: 0, bits: 0 }, action)
     }
 
     pub(crate) fn new_branch(key: Box<[u8],A>, mask: u8) -> Node<T,N,K,A,H,M> {
@@ -326,12 +335,12 @@ impl<T: Digestible, const N: usize, const K: usize, A: Allocator + Clone, H: Dig
                 // for each key, check whether that key can reach a particular child slot
                 // by running find with a zero-bound (disabling recursion into child nodes)
                 for (key, bits) in keys.into_iter() {
-                    node.find(Some(0), key, BitPosition { index: 0, bits }, |_, res| {
+                    node.probe(Some(0), key, BitPosition { index: 0, bits }, |_, res| {
                         match res {
                             // this key reached a child slot, which means we must continue
                             // to check whether this key exists in the tree or not by computing
                             // a mapping from child slot -> key suffixes
-                            FindResult::Bounded(p, _, slot) => {
+                            ProbeResult::Bounded(p, _, slot) => {
                                 let keys: &mut Vec<_> = per_node_keys.entry(slot).or_default();
                                 keys.push((&key[p.index..], p.bits));
                             }
