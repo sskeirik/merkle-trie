@@ -2,17 +2,18 @@ use std::fmt::Debug;
 use allocator_api2::alloc::Global;
 use digest::{Digest, Output};
 use crate::digestible::{Digestible, empty_hash};
-use crate::merkle::types::{Trie, TrieMode, Node, NodeUpdate, Kind, Concrete, Partial, SimpleUpdate};
+use crate::merkle::types::{Trie, TrieMode, Node, NodeUpdate, Kind, NodeUpsert};
+use crate::merkle::types::mode::*;
 use crate::utils::{Allocator, copy_slice_into_box};
 
-impl<T: Digestible, const N: usize, const K: usize, H: Digest> Trie<T,N,K,Global,H,Concrete> {
+impl<T: Digestible, const N: usize, const K: usize, H: Digest> Trie<T,N,K,Global,H,Complete> {
     /// Create a new compressed Merkle trie using the global allocator
     pub fn new() -> Self {
         Self::new_in(Global)
     }
 }
 
-impl<T: Digestible, const N: usize, const K: usize, A: Allocator + Clone, H: Digest> Trie<T,N,K,A,H,Concrete> {
+impl<T: Digestible, const N: usize, const K: usize, A: Allocator + Clone, H: Digest> Trie<T,N,K,A,H,Complete> {
     /// Create a new compressed Merkle trie using the given allocator
     pub fn new_in(alloc: A) -> Self {
         Trie(alloc, None)
@@ -40,7 +41,7 @@ impl<T: Digestible, const N: usize, const K: usize, A: Allocator + Clone, H: Dig
     /// Set the value of target_key in the trie
     #[must_use]
     pub fn set(&mut self, target_key: &[u8], value: T) -> Result<(), &'static str> {
-        self.update(target_key, SimpleUpdate(value))
+        self.update(target_key, NodeUpsert { value })
     }
 
     /// Return a reference to the value of search_key in the trie, if it exists
@@ -54,7 +55,7 @@ impl<T: Digestible, const N: usize, const K: usize, A: Allocator + Clone, H: Dig
     }
 }
 
-impl<T: Digestible, const N: usize, const K: usize, A: Allocator + Clone, H: Digest> Trie<T,N,K,A,H,Concrete> {
+impl<T: Digestible, const N: usize, const K: usize, A: Allocator + Clone, H: Digest> Trie<T,N,K,A,H,Complete> {
     /// Convert a concrete trie to a partial trie
     #[must_use]
     pub fn to_partial(self) -> Trie<T,N,K,A,H,Partial> {

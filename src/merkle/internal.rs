@@ -4,7 +4,8 @@ use std::collections::HashMap;
 use std::fmt::Debug;
 use digest::{Digest, Output};
 use crate::digestible::{Digestible, empty_hash};
-use crate::merkle::types::{TrieMode, Node, NodeUpdate, Kind, BranchData, Concrete, Partial};
+use crate::merkle::types::{TrieMode, Node, NodeUpdate, Kind, BranchData};
+use crate::merkle::types::mode::*;
 use crate::utils::{Allocator, Box, pick_mut_unchecked};
 use crate::bitseqops::{BitDiff, BitPosition, BitSeqOps, find_first_distinct_bits};
 #[allow(unused_imports)] // debugging
@@ -275,7 +276,7 @@ impl<T: Digestible + Debug, const N: usize, const K: usize, A: Allocator + Clone
     }
 }
 
-impl<T: Digestible, const N: usize, const K: usize, A: Allocator + Clone, H: Digest> Node<T,N,K,A,H,Concrete> {
+impl<T: Digestible, const N: usize, const K: usize, A: Allocator + Clone, H: Digest> Node<T,N,K,A,H,Complete> {
     pub fn to_partial(self) -> Node<T,N,K,A,H,Partial> {
         // SAFETY: Kind is #[repr(C, u8)] and Node/BranchData are #[repr(C)], and the
         // only field whose type varies with the mode (`Kind::Opaque`'s second field,
@@ -383,9 +384,9 @@ mod witness_tests {
     use allocator_api2::alloc::Global;
     use sha2::Sha256;
     use test_log::test;
-    use crate::merkle::types::{Concrete, Kind, Node, Trie};
+    use crate::merkle::types::{Complete, Kind, Node, Trie};
 
-    type U64BinaryTrie = Trie<u64,4,2,Global,Sha256,Concrete>;
+    type U64BinaryTrie = Trie<u64,4,2,Global,Sha256,Complete>;
 
     #[test]
     fn initial_node_has_initial_key() {
@@ -405,7 +406,7 @@ mod witness_tests {
     fn preserves_key_and_digest() {
         let mut t: U64BinaryTrie = Trie::new();
         t.set(&[1,2,3,], 42).unwrap();
-        let leaf: Node<u64, 4, 2, Global, Sha256, Concrete> = Node {
+        let leaf: Node<u64, 4, 2, Global, Sha256, Complete> = Node {
             key: crate::utils::copy_slice_into_box(&[1, 2, 3], Global),
             kind: Kind::Leaf { value: 42u64, _phantom: std::marker::PhantomData },
         };

@@ -1,11 +1,16 @@
+//! Defines a trait [`Digestible`] which can be hashed via [`Digest`] functions.
+//! 
+//! Additionally defines [`Digestible`] impls for basic types.
+
 use digest::{Digest, Output};
 use either::Either;
 
+/// Given a [`Digest`]-compatible hash, return the hash of the empty byte string
 pub fn empty_hash<H: Digest>() -> Output<H> {
     H::new().finalize()
 }
 
-/// Trait for types that can feed their content into a digest hasher.
+/// Trait for types that can feed their content into a [`Digest`] hasher.
 pub trait Digestible {
     fn digest_update<D: Digest>(&self, hasher: &mut D);
 }

@@ -167,7 +167,7 @@ impl BitDiff {
     }
 }
 
-/// An attachment point for bit-level operations that depend on a constant power-of-two K in the range [2,256].
+/// An attachment point for bit-level operations that depend on a constant power-of-two K in the range \[2,256\].
 /// This struct is a ZST, is never constructed, and is only used for its const parameter to guide function monomorphization.
 pub struct BitSeqOps<const K: usize>;
 
@@ -188,7 +188,7 @@ impl<const K: usize> BitSeqOps<K> {
 
     /// Given a src buffer, a byte index, and a bit offset, find the
     /// unique [0, 2^K)-valued integer obtained from applying the
-    /// offset-derived bitmask to src[index]
+    /// offset-derived bitmask to src\[index\]
     #[inline]
     pub fn mask_value(src: &[u8], index: usize, bit_index: usize) -> usize {
         let mask = Self::mask(bit_index);
