@@ -23,11 +23,13 @@ pub(crate) enum FindResult<N,B> {
 
 impl<T: Digestible, const N: usize, const K: usize, A: Allocator + Clone, H: Digest, M: TrieMode> Node<T,N,K,A,H,M> {
 
-    #[instrument(level="debug", skip_all)]
+    #[instrument(level="debug", skip(self, bound, key, action))]
     pub(crate) fn find<'a, R>(&'a self, mut bound: Option<usize>, key: &[u8], pos: BitPosition, action: impl FnOnce(BitPosition, FindResult<&'a Self, &'a BranchData<T,N,K,A,H,M>>) -> R) -> R {
+        let label = if cfg!(debug_assertions) { self.debug_label() } else { const { String::new() } };
+
         // if keys are identical, return current node and lack of diff
         let Some(split) = find_first_distinct_bits(&key[pos.index..], &self.key, pos.bits, None, Some(self.get_key_bits())) else {
-            debug!("At {}:{pos:?}, exact match found", to_ascii(key));
+            debug!("For {}, exact match found at node {}", to_ascii(key), label);
             return action(pos, FindResult::ExactMatch(self))
         };
 
@@ -37,53 +39,59 @@ impl<T: Digestible, const N: usize, const K: usize, A: Allocator + Clone, H: Dig
                 let slot = split.slot::<K>(key);
                 if let Some((_hash, child)) = branch.children[slot].as_ref() {
                     match bound {
-                        Some(0) => return action(pos, FindResult::Bounded(split.pos, self, slot)),
+                        Some(0) => {
+                            debug!("For {}, search bound hit at node {}", to_ascii(key), label);
+                            return action(pos, FindResult::Bounded(split.pos, self, slot))
+                        }
                         Some(ref mut n) => *n -= 1,
                         _ => {}
                     };
                     child.find(bound, key, split.pos, action)
                 } else {
-                    debug!("At {}:{pos:?}, empty slot found at branch {}", to_ascii(key), self.dump_metadata());
+                    debug!("For {}, empty slot found at branch {}", to_ascii(key), label);
                     action(pos, FindResult::EmptySlot(branch,slot))
                 }
             },
             // no subtrie to explore, return
             _ => {
-                debug!("At {}:{pos:?}, disagreement {split:?} occured at: {}", to_ascii(key), self.dump_metadata());
+                debug!("For {}, disagreement {split:?} found at node {}", to_ascii(key), self.debug_label());
                 action(pos, FindResult::Disagreement(self, split))
             }
         }
     }
 
-    #[instrument(level="debug", skip_all)]
+    #[instrument(level="debug", skip(self, bound, key, action))]
     pub(crate) fn find_mut<R>(&mut self, mut bound: Option<usize>, hash: Option<&mut Output<H>>, key: &[u8], pos: BitPosition, action: impl for <'a> FnOnce(BitPosition, FindResult<&'a mut Self, &'a mut BranchData<T,N,K,A,H,M>>) -> R) -> R {
+        let label = if cfg!(debug_assertions) { self.debug_label() } else { const { String::new() } };
+
         // if keys are identical, return current node and lack of diff
         let Some(split) = find_first_distinct_bits(&key[pos.index..], &self.key, pos.bits, None, Some(self.get_key_bits())) else {
-            debug!("At {}:{pos:?}, exact match found", to_ascii(key));
+            debug!("For {}, exact match found at node {}", to_ascii(key), label);
             return action(pos, FindResult::ExactMatch(self))
         };
 
         // otherwise, check if we can explore a subtrie
-        // TODO: make this conditional on debug trace enabled, if possible
-        let self_meta = self.dump_metadata();
         let result = match (&mut self.kind, split.prefix) {
             (Kind::Branch(branch), Some(1)) => {
                 let slot = split.slot::<K>(key);
                 if let Some((hash, child)) = branch.children[slot].as_mut() {
                     match bound {
-                        Some(0) => return action(pos, FindResult::Bounded(split.pos, self, slot)),
+                        Some(0) => {
+                            debug!("For {}, search bound hit at node {}", to_ascii(key), label);
+                            return action(pos, FindResult::Bounded(split.pos, self, slot))
+                        }
                         Some(ref mut n) => *n -= 1,
                         _ => {}
                     };
                     child.find_mut(bound, Some(hash), key, split.pos, action)
                 } else {
-                    debug!("At {}:{pos:?}, empty slot found at branch {}", to_ascii(key), self_meta);
+                    debug!("For {}, empty slot found at branch {}", to_ascii(key), label);
                     action(pos, FindResult::EmptySlot(branch, slot))
                 }
             },
             // no subtrie to explore, return
             _ => {
-                debug!("At {}:{pos:?}, disagreement {split:?} occured at: {}", to_ascii(key), self.dump_metadata());
+                debug!("For {}, disagreement {split:?} found at node {}", to_ascii(key), label);
                 action(pos, FindResult::Disagreement(self, split))
             }
         };
@@ -219,7 +227,7 @@ impl<T: Digestible, const N: usize, const K: usize, A: Allocator + Clone, H: Dig
         }
     }
 
-    fn dump_metadata(&self) -> String {
+    fn debug_label(&self) -> String {
         match &self.kind {
             Kind::Leaf { .. } => format!("L({},*)", to_bin::<false>(&self.key)),
             Kind::Branch(BranchData { mask, children: _ }) => format!("B({},{},..)", to_bin::<false>(&self.key), to_bin::<false>(&[*mask])),

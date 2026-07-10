@@ -1,3 +1,5 @@
+use std::fmt::Debug;
+use digest::typenum::Bit;
 use tracing::instrument;
 use crate::utils::{Allocator, Box, copy_slice_into_box};
 #[allow(unused_imports)] // used for debug purposes
@@ -55,12 +57,18 @@ pub(crate) fn stamp_suffix(suffix: &mut [u8], mask: u8) -> u8 {
 }
 
 /// Encodes a bit position in a byte string
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub struct BitPosition {
     /// index of a whole byte
     pub index: usize,
     /// bit index inside a byte
     pub bits: usize,
+}
+
+impl Debug for BitPosition {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{{{}:{}}}", self.index, self.bits)
+    }
 }
 
 /// Encodes a fixed length diff (sequence of log2(K) bits,
