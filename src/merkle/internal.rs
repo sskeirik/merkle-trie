@@ -314,6 +314,20 @@ impl<T: Digestible, const N: usize, const K: usize, A: Allocator + Clone, H: Dig
         let this = std::mem::ManuallyDrop::new(self);
         unsafe { std::mem::transmute_copy(&this) }
     }
+
+    /// Boxed variant of [`Self::to_partial`], reinterpreting `Box<Self,A>` in place without
+    /// unboxing/reboxing so the allocation is reused as-is.
+    pub fn to_partial_boxed(this: Box<Self,A>) -> Box<Node<T,N,K,A,H,Partial>,A> {
+        // SAFETY: see `to_partial` -- Self and Node<T,N,K,A,H,Partial> are layout-identical,
+        // so the pointee behind the box may be reinterpreted; the allocator is threaded
+        // through unchanged so the box can later be freed in the same allocator it came from.
+        const {
+            assert!(std::mem::size_of::<Self>() == std::mem::size_of::<Node<T,N,K,A,H,Partial>>());
+            assert!(std::mem::align_of::<Self>() == std::mem::align_of::<Node<T,N,K,A,H,Partial>>());
+        };
+        let (raw, alloc) = Box::into_raw_with_allocator(this);
+        unsafe { Box::from_raw_in(raw as *mut Node<T,N,K,A,H,Partial>, alloc) }
+    }
 }
 
 impl<T: Digestible, const N: usize, const K: usize, A: Allocator + Clone, H: Digest> Node<T,N,K,A,H,Partial> {
