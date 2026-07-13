@@ -206,6 +206,7 @@ impl<T: Digestible, const N: usize, const K: usize, A: Allocator + Clone, H: Dig
         self.probe_mut(alloc_copy, None, target_key, BitPosition { index: 0, bits: 0 }, action)
     }
 
+    /// The internal implementation of [`Trie::delete`] as a thin wrapper around `Self::probe_mut`.
     pub fn delete(&mut self, target_key: &[u8], alloc: A) -> Option<T> {
         use ProbeResult::*;
         let action = |_: BitPosition, find_result: ProbeResult<&mut Self, NonNoneMut<NodeLinkRef<T,N,K,A,H,M>>> | {
@@ -256,19 +257,19 @@ impl<T: Digestible, const N: usize, const K: usize, A: Allocator + Clone, H: Dig
         self.0.as_ref().map_or(empty_hash::<H>(), |(hash, _)| hash.clone())
     }
 
-    fn deref(&self) -> Option<&(Output<H>, Box<Node<T,N,K,A,H,M>,A>)> {
+    pub fn deref(&self) -> Option<&NodeLinkRef<T,N,K,A,H,M>> {
         self.0.as_ref()
     }
 
-    fn deref_mut(&mut self) -> Option<&mut(Output<H>, Box<Node<T,N,K,A,H,M>,A>)> {
+    pub fn deref_mut(&mut self) -> Option<&mut NodeLinkRef<T,N,K,A,H,M>> {
         self.0.as_mut()
     }
 
-    fn as_opt_ref(&self) -> Option<NonNone<'_, (Output<H>, Box<Node<T,N,K,A,H,M>, A>)>> {
+    pub fn as_opt_ref(&self) -> Option<NonNone<'_, NodeLinkRef<T,N,K,A,H,M>>> {
         NonNone::new(&self.0)
     }
 
-    fn as_opt_mut(&mut self) -> Option<NonNoneMut<'_, (Output<H>, Box<Node<T,N,K,A,H,M>, A>)>> {
+    pub fn as_opt_mut(&mut self) -> Option<NonNoneMut<'_, NodeLinkRef<T,N,K,A,H,M>>> {
         NonNoneMut::new(&mut self.0)
     }
 

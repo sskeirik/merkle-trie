@@ -43,7 +43,7 @@ impl<T: Digestible, const N: usize, const K: usize, A: Allocator + Clone, H: Dig
         self.update(target_key, NodeUpsert { value })
     }
 
-    /// Delete a node from the tree and return its value
+    /// Delete a non-opaque node from the tree and return its value
     pub fn delete(&mut self, target_key: &[u8]) -> Option<T> {
         self.1.delete(target_key, self.0.clone())
     }
