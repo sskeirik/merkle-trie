@@ -85,7 +85,7 @@ impl<T: Digestible, const N: usize, const K: usize, A: Allocator + Clone, H: Dig
         };
 
         let (result, merge_data) = match (&mut node.kind, split.prefix) {
-            (Kind::Branch { children, count, mask }, Some(1)) => {
+            (Kind::Branch { children, mask }, Some(1)) => {
                 let slot = split.mask_value::<K>(key);
                 match bound {
                     Some(0) => {
@@ -97,34 +97,22 @@ impl<T: Digestible, const N: usize, const K: usize, A: Allocator + Clone, H: Dig
                 };
                 let child = &mut children[slot];
                 // perform post-deletion cleanup, if necessary
-                let pre_status = child.0.is_some();
+                let pre_full = child.0.is_some();
                 let result = child.probe_mut(alloc.clone(), bound, key, split.pos, action);
-                let post_status = child.0.is_some();
+                let post_empty = child.0.is_none();
                 // is child count delta non-zero?
-                let to_merge_child = if pre_status ^ post_status {
-                    // apply delta
-                    if pre_status {
-                        *count -= 1
-                    } else {
-                        *count += 1
-                    }
-                    // if count is singleton, perform merge
-                    if *count == 1 {
-                        let mut child_data = None;
-                        for (final_slot, link) in children.iter_mut().enumerate() {
-                            if let Some((_hash, node)) = link.0.take() {
-                                if child_data.is_some() {
-                                    panic!("final node must be unique");
-                                }
-                                child_data = Some((final_slot, Box::into_inner(node)));
+                let to_merge_child = if pre_full & post_empty {
+                    // if one child remains, perform merge
+                    let mut child_data = None;
+                    for (final_slot, link) in children.iter_mut().enumerate() {
+                        if let Some((_hash, node)) = link.0.take() {
+                            if child_data.is_some() {
                                 break;
                             }
+                            child_data = Some((final_slot, Box::into_inner(node)));
                         }
-                        let (final_slot, child) = child_data.expect("final node must exist");
-                        Some((*mask, final_slot, child))
-                    } else {
-                        None
                     }
+                    child_data.map(|(final_slot, child)| (*mask, final_slot, child))
                 } else {
                     None
                 };
@@ -248,7 +236,7 @@ impl<T: Digestible, const N: usize, const K: usize, A: Allocator + Clone, H: Dig
         };
         match &node.kind {
             Kind::Leaf { .. } => format!("{} -> L({},*)", HashFrag::<H>(hash), to_bin::<false>(&node.key)),
-            Kind::Branch { mask, count, children: _ } => format!("{} -> B({},{},{count} children)", HashFrag::<H>(hash), to_bin::<false>(&node.key), to_bin::<false>(&[*mask])),
+            Kind::Branch { mask, children: _ } => format!("{} -> B({},{},..)", HashFrag::<H>(hash), to_bin::<false>(&node.key), to_bin::<false>(&[*mask])),
             Kind::Opaque(..) => format!("{} -> O()", HashFrag::<H>(hash))
         }
     }
@@ -281,7 +269,7 @@ impl<T: Digestible, const N: usize, const K: usize, A: Allocator + Clone, H: Dig
 impl<T: Digestible, const N: usize, const K: usize, A: Allocator + Clone, H: Digest, M: TrieMode> Node<T,N,K,A,H,M> {
     /// Constructs a new branch node for this trie
     pub(crate) fn new_branch(key: Box<[u8],A>, mask: u8) -> Self {
-        Self { key, kind: Kind::Branch { mask, count: 0, children: [const { NodeLink(None) }; K] }}
+        Self { key, kind: Kind::Branch { mask, children: [const { NodeLink(None) }; K] }}
     }
 
     /// Constructs a new leaf node for this trie
@@ -296,14 +284,7 @@ impl<T: Digestible, const N: usize, const K: usize, A: Allocator + Clone, H: Dig
     unsafe fn raw_set_child(&mut self, idx: usize, node: Self, alloc: A) -> Result<(), &'static str> {
         let link = NodeLink(Some((node.digest(), Box::new_in(node, alloc))));
         match &mut self.kind {
-            Kind::Branch { children, count, .. } => {
-                let child_slot = &mut children[idx];
-                let was_empty = child_slot.is_empty();
-                *child_slot = link;
-                if was_empty { 
-                    *count += 1; 
-                }
-            }
+            Kind::Branch { children, .. } => children[idx] = link,
             // SAFETY: by assumption
             Kind::Leaf { .. } | Kind::Opaque(..) => unsafe { std::hint::unreachable_unchecked() },
         };
@@ -347,7 +328,7 @@ impl<T: Digestible, const N: usize, const K: usize, A: Allocator + Clone, H: Dig
             }
             // NOTE: the count field does not contribute to the digest since
             // it is just a read-only view over the children field
-            Kind::Branch { mask, children, count: _ } => {
+            Kind::Branch { mask, children } => {
                 let mut hasher = H::new();
                 Digest::update(&mut hasher, &self.key);
                 Digest::update(&mut hasher, [*mask]);

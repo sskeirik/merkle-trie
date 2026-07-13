@@ -52,8 +52,6 @@ pub enum Kind<T: Digestible, const N: usize, const K: usize, A: Allocator + Clon
     Branch {
         /// Encodes the log2(`K`) bits in the [`Node::key`]`.len()`th byte that distinguishes the keys of child nodes
         mask: u8,
-        /// Stores the number of child nodes in this branch
-        count: u16,
         /// Stores the `K` child nodes of this branch
         children: [NodeLink<T,N,K,A,H,M>; K],
     },
