@@ -4,6 +4,16 @@
 
 use digest::{Digest, Output};
 use either::Either;
+use crate::utils::to_hex;
+
+pub struct HashFrag<'a, H: Digest>(pub &'a Output<H>);
+impl<'a, H: Digest> std::fmt::Display for HashFrag<'a,H> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let hash = &self.0;
+        let hash_prefix = &hash[0..std::cmp::min(hash.len(),4)];
+        f.write_str(&to_hex::<false>(hash_prefix))
+    }
+}
 
 /// Given a [`Digest`]-compatible hash, return the hash of the empty byte string
 pub fn empty_hash<H: Digest>() -> Output<H> {

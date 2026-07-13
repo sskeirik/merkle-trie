@@ -20,7 +20,7 @@ use crate::utils::{Allocator, Box};
 ///
 /// If `T` also implements [`Debug`]/[`Clone`], then [`Trie`] will implements [`Debug`]/[`Clone`].
 #[derive(Clone)]
-pub struct Trie<T: Digestible, const N: usize, const K: usize, A: Allocator + Clone, H: Digest, M: TrieMode>(pub(crate) A, pub(crate) Option<(Output<H>, Node<T,N,K,A,H,M>)>);
+pub struct Trie<T: Digestible, const N: usize, const K: usize, A: Allocator + Clone, H: Digest, M: TrieMode>(pub(crate) A, pub(crate) NodeLink<T,N,K,A,H,M>);
 
 /// A node in a Merkleized, compressed trie.
 /// 
@@ -38,22 +38,6 @@ pub struct Node<T: Digestible, const N: usize, const K: usize, A: Allocator + Cl
     pub kind: Kind<T,N,K,A,H,M>,
 }
 
-/// The payload for a [`Trie`] node of [`Kind::Branch`].
-/// 
-/// The `repr(C)` attribute ensures a consistent representation across the distinct [`TrieMode`]s
-/// 
-/// This type is made public for documentation purposes, but since
-/// the [`Trie`] internals are private, it cannot be directly used
-/// for [`Trie`] introspection.
-#[derive(Clone)]
-#[repr(C)]
-pub struct BranchData<T: Digestible, const N: usize, const K: usize, A: Allocator + Clone, H: Digest, M: TrieMode> {
-    /// Encodes the log2(`K`) bits in the [`Node::key`]`.len()`th byte that distinguishes the keys of child nodes
-    pub mask: u8,
-    /// Stores the `K` child nodes of this branch
-    pub children: [Option<HashNode<T,N,K,A,H,M>>; K],
-}
-
 /// A generic Merkle trie node payload
 /// 
 /// The `repr(C,u8)` attribute ensures a consistent representation across the distinct [`TrieMode`]s
@@ -65,7 +49,14 @@ pub struct BranchData<T: Digestible, const N: usize, const K: usize, A: Allocato
 #[repr(C, u8)]
 pub enum Kind<T: Digestible, const N: usize, const K: usize, A: Allocator + Clone, H: Digest, M: TrieMode> {
     /// A trie branch
-    Branch(BranchData<T,N,K,A,H,M>),
+    Branch {
+        /// Encodes the log2(`K`) bits in the [`Node::key`]`.len()`th byte that distinguishes the keys of child nodes
+        mask: u8,
+        /// Stores the number of child nodes in this branch
+        count: u16,
+        /// Stores the `K` child nodes of this branch
+        children: [NodeLink<T,N,K,A,H,M>; K],
+    },
     /// A trie leaf
     Leaf {
         /// the data stored at this leaf
@@ -77,8 +68,14 @@ pub enum Kind<T: Digestible, const N: usize, const K: usize, A: Allocator + Clon
     Opaque(Output<H>, M::Marker),
 }
 
-/// A pair of a boxed node and its stored digest
-pub type HashNode<T, const N: usize, const K: usize, A, H, M> = (Output<H>, Box<Node<T,N,K,A,H,M>, A>);
+/// The hash reference contained inside a [`NodeLink`]
+pub type NodeLinkRef<T,const N: usize, const K: usize, A, H, M> = (Output<H>, Box<Node<T,N,K,A,H,M>, A>);
+
+/// A nullable link between [`Node`]s in a [`Trie`]
+#[derive(Clone)]
+pub struct NodeLink<T: Digestible, const N: usize, const K: usize, A: Allocator + Clone, H: Digest, M: TrieMode>(
+    pub Option<NodeLinkRef<T,N,K,A,H,M>>,
+);
 
 // implement opaque trie node partial type
 mod sealed { pub trait SealedTrieMode {} }

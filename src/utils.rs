@@ -9,6 +9,67 @@ pub use allocator_api2::{boxed::Box, alloc::Allocator};
 pub use std::{boxed::Box, alloc::Allocator};
 use std::fmt::Write;
 
+pub struct NonNone<'a,T>(&'a Option<T>);
+pub struct NonNoneMut<'a,T>(&'a mut Option<T>);
+
+impl<'a,T> NonNone<'a,T> {
+    pub fn new(opt: &'a Option<T>) -> Option<Self> {
+        if opt.is_none() {
+            return None
+        }
+        return Some(Self(opt))
+    }
+
+    pub unsafe fn assume(opt: &'a Option<T>) -> Self {
+        return Self(opt)
+    }
+
+    pub fn get(&self) -> &'a T {
+        // SAFETY: by construction
+        let opt_ref = self.0.as_ref();
+        unsafe { opt_ref.unwrap_unchecked() }
+    }
+
+    pub fn into_inner(self) -> &'a Option<T> {
+        self.0
+    }
+}
+
+impl<'a,T> NonNoneMut<'a,T> {
+    pub fn new(opt: &'a mut Option<T>) -> Option<Self> {
+        if opt.is_none() {
+            return None
+        }
+        return Some(Self(opt))
+    }
+
+    pub unsafe fn assume(opt: &'a mut Option<T>) -> Self {
+        return Self(opt)
+    }
+
+    pub fn as_ref(&self) -> &T {
+        // SAFETY: by construction
+        let opt_ref = self.0.as_ref();
+        unsafe { opt_ref.unwrap_unchecked() }
+    }
+
+    pub fn as_mut(&mut self) -> &mut T {
+        // SAFETY: by construction
+        let opt_ref = self.0.as_mut();
+        unsafe { opt_ref.unwrap_unchecked() }
+    }
+
+    pub fn into_inner(self) -> &'a mut Option<T> {
+        self.0
+    }
+
+    pub fn into_mut(self) -> &'a mut T {
+        let opt_mut = self.0.as_mut();
+        // SAFETY: by construction
+        unsafe { opt_mut.unwrap_unchecked() }
+    }
+}
+
 /// Given a mutable input slice and a list of `indices`, return a vector of mutable references for each indexed element
 ///
 /// SAFETY: Caller must ensure that each index in the `indices` array is in-bounds for the input slice and that it contains no duplicates.
