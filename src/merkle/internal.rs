@@ -1,6 +1,5 @@
 /// Defines the Merkle Trie operations
 use std::collections::HashMap;
-use std::fmt::Debug;
 use digest::{Digest, Output};
 use crate::digestible::{Digestible, HashFrag, empty_hash};
 use crate::merkle::types::{TrieMode, Node, NodeLink, NodeLinkRef, NodeUpdate, Kind};
@@ -9,14 +8,12 @@ use crate::utils::{Allocator, Box, NonNone, NonNoneMut, pick_mut_unchecked};
 use crate::bitseqops::{BitDiff, BitPosition, BitSeqOps, find_first_distinct_bits};
 #[allow(unused_imports)] // debugging or doc-comments
 use {
-    crate::merkle::types::Trie,
     tracing::{instrument, debug},
-    crate::trace_val,
     crate::utils::{to_ascii, to_bin, to_hex},
 };
 
-/// Represents why a probe result terminated
-pub(crate) enum ProbeResult<L,N> {
+/// A probe result to be handled by a probe action
+pub enum ProbeResult<L,N> {
     /// An empty child slot corresponding to the probe key was found at N
     EmptySlot(L),
     /// An exact match for the probe key was found at N
@@ -29,16 +26,16 @@ pub(crate) enum ProbeResult<L,N> {
     Bounded(N, BitPosition, usize),
 }
 
-impl<T: Digestible, const N: usize, const K: usize, A: Allocator + Clone, H: Digest, M: TrieMode> NodeLink<T,N,K,A,H,M> {
+impl<T: Digestible, const N: usize, const K: usize, H:Digest, A: Allocator + Clone, M: TrieMode> NodeLink<T,N,K,H,A,M> {
 
-    /// Probes the trie, optionally with a bound, applying a user-specified action when the probe terminates
+    /// Probe the trie, optionally with a bound, applying a user-specified action when the probe terminates
     #[instrument(level="debug", skip(self, bound, key, action))]
-    pub(crate) fn probe<'a, R>(&'a self, mut bound: Option<usize>, key: &[u8], pos: BitPosition, action: impl FnOnce(BitPosition, ProbeResult<&'a Self, NonNone<'a,NodeLinkRef<T,N,K,A,H,M>>>) -> R) -> R {
+    fn probe<'a, R>(&'a self, mut bound: Option<usize>, key: &[u8], pos: BitPosition, action: impl FnOnce(BitPosition, ProbeResult<(), NonNone<'a,NodeLinkRef<T,N,K,H,A,M>>>) -> R) -> R {
         let label = if cfg!(debug_assertions) { self.debug_label() } else { const { String::new() } };
 
         let Some(opt_ref) = self.as_opt_ref() else {
             debug!("For {}, empty slot found at branch {}", to_ascii(key), label);
-            return action(pos, ProbeResult::EmptySlot(self))
+            return action(pos, ProbeResult::EmptySlot(()))
         };
         let (_hash, node) = opt_ref.get();
 
@@ -68,9 +65,9 @@ impl<T: Digestible, const N: usize, const K: usize, A: Allocator + Clone, H: Dig
         }
     }
 
-    /// Probes the trie mutably, optionally with a bound, applying a user-specified action when the probe terminates that may modify the trie
+    /// Probe the trie mutably, optionally with a bound, applying a user-specified action when the probe terminates that may modify the trie
     #[instrument(level="debug", skip(self, bound, key, action, alloc))]
-    pub(crate) fn probe_mut<R>(&mut self, alloc: A, mut bound: Option<usize>, key: &[u8], pos: BitPosition, action: impl for <'a> FnOnce(BitPosition, ProbeResult<&'a mut Self, NonNoneMut<'a,NodeLinkRef<T,N,K,A,H,M>>>) -> R) -> R {
+    fn probe_mut<R>(&mut self, alloc: A, mut bound: Option<usize>, key: &[u8], pos: BitPosition, action: impl for <'a> FnOnce(BitPosition, ProbeResult<&'a mut Self, NonNoneMut<'a,NodeLinkRef<T,N,K,H,A,M>>>) -> R) -> R {
         let label = if cfg!(debug_assertions) { self.debug_label() } else { const { String::new() } };
 
         let Some(mut opt_mut) = self.as_opt_mut() else {
@@ -128,18 +125,18 @@ impl<T: Digestible, const N: usize, const K: usize, A: Allocator + Clone, H: Dig
         if let Some((mask, slot, child)) = merge_data {
             // move child payload up, allocate new merged_key
             node.kind = child.kind;
-            node.key = BitSeqOps::<K>::merge_prefix_mask_suffix(node.key.as_ref(), mask, slot as u8, child.key, alloc);
+            node.key = BitSeqOps::<K>::recover(node.key.as_ref(), mask, slot as u8, child.key, alloc);
         }
         // fixup our hash if we have one
         *hash = node.digest();
         result
     }
 
-    /// The internal implementation of [`Trie::update`] as a thin wrapper around `Self::probe_mut`.
-    pub fn update<U: NodeUpdate<T>>(&mut self, target_key: &[u8], updater: U, alloc: A) -> Result<(), &'static str> {
+    /// Implement [`Trie::update`] as a thin wrapper around `Self::probe_mut`.
+    pub(super) fn update<U: NodeUpdate<T>>(&mut self, target_key: &[u8], updater: U, alloc: A) -> Result<(), &'static str> {
         use ProbeResult::*;
         let alloc_copy = alloc.clone();
-        let action = move |pos: BitPosition, find_result: ProbeResult<&mut Self, NonNoneMut<NodeLinkRef<T,N,K,A,H,M>>> | {
+        let action = move |pos: BitPosition, find_result: ProbeResult<&mut Self, NonNoneMut<NodeLinkRef<T,N,K,H,A,M>>> | {
             match find_result {
                 EmptySlot(link) => {
                     if let Some(value) = updater.on_vacant() {
@@ -194,10 +191,10 @@ impl<T: Digestible, const N: usize, const K: usize, A: Allocator + Clone, H: Dig
         self.probe_mut(alloc_copy, None, target_key, BitPosition { index: 0, bits: 0 }, action)
     }
 
-    /// The internal implementation of [`Trie::delete`] as a thin wrapper around `Self::probe_mut`.
-    pub fn delete(&mut self, target_key: &[u8], alloc: A) -> Option<T> {
+    /// Implement [`Trie::delete`] as a thin wrapper around `Self::probe_mut`.
+    pub(super) fn delete(&mut self, target_key: &[u8], alloc: A) -> Option<T> {
         use ProbeResult::*;
-        let action = |_: BitPosition, find_result: ProbeResult<&mut Self, NonNoneMut<NodeLinkRef<T,N,K,A,H,M>>> | {
+        let action = |_: BitPosition, find_result: ProbeResult<&mut Self, NonNoneMut<NodeLinkRef<T,N,K,H,A,M>>> | {
             match find_result {
                 ExactMatch(link) => {
                     match &link.as_ref().1.kind {
@@ -217,19 +214,34 @@ impl<T: Digestible, const N: usize, const K: usize, A: Allocator + Clone, H: Dig
         self.probe_mut(alloc, None, target_key, BitPosition { index: 0, bits: 0 }, action)
     }
 
-    /// The internal implementation of [`Trie::get`] as a thin wrapper around `Self::probe`.
-    pub fn get<'a>(&'a self, search_key: &[u8]) -> Option<&'a T> {
+    /// Implement [`Trie::get`] as a thin wrapper around `Self::probe`.
+    pub(super) fn get<'a>(&'a self, search_key: &[u8]) -> Option<&'a T> {
         use ProbeResult::*;
-        let action = |_pos, result: ProbeResult<&'a Self, NonNone<'a, NodeLinkRef<T,N,K,A,H,M>>>| {
+        let action = |_pos, result: ProbeResult<(), NonNone<'a, NodeLinkRef<T,N,K,H,A,M>>>| {
             match result {
-                ExactMatch(ref link) => link.get().1.value(),
+                ExactMatch(ref link) => link.get().1.value_ref(),
                 _ => None,
             }
         };
         self.probe(None, search_key, BitPosition { index: 0, bits: 0 }, action)
     }
 
-    /// Generates a short node label for debugging purposes
+    /// Return the digest stored at this [`NodeLink`]
+    pub(super) fn stored_digest(&self) -> Output<H> {
+        self.0.as_ref().map_or(empty_hash::<H>(), |(hash, _)| hash.clone())
+    }
+
+    /// Return a reference to this [`NodeLink`]'s payload as optional `NonNone` option reference
+    fn as_opt_ref(&self) -> Option<NonNone<'_, NodeLinkRef<T,N,K,H,A,M>>> {
+        NonNone::new(&self.0)
+    }
+
+    /// Return a reference to this [`NodeLink`]'s payload as optional `NonNoneMut` option reference
+    fn as_opt_mut(&mut self) -> Option<NonNoneMut<'_, NodeLinkRef<T,N,K,H,A,M>>> {
+        NonNoneMut::new(&mut self.0)
+    }
+
+    /// Generate a short node label for debugging purposes
     fn debug_label(&self) -> String {
         let Some((hash, node)) = self.0.as_ref() else {
             return "Trie(Empty)".to_string()
@@ -240,44 +252,42 @@ impl<T: Digestible, const N: usize, const K: usize, A: Allocator + Clone, H: Dig
             Kind::Opaque(..) => format!("{} -> O()", HashFrag::<H>(hash))
         }
     }
-
-    pub(crate) fn stored_digest(&self) -> Output<H> {
-        self.0.as_ref().map_or(empty_hash::<H>(), |(hash, _)| hash.clone())
-    }
-
-    pub fn deref(&self) -> Option<&NodeLinkRef<T,N,K,A,H,M>> {
-        self.0.as_ref()
-    }
-
-    pub fn deref_mut(&mut self) -> Option<&mut NodeLinkRef<T,N,K,A,H,M>> {
-        self.0.as_mut()
-    }
-
-    pub fn as_opt_ref(&self) -> Option<NonNone<'_, NodeLinkRef<T,N,K,A,H,M>>> {
-        NonNone::new(&self.0)
-    }
-
-    pub fn as_opt_mut(&mut self) -> Option<NonNoneMut<'_, NodeLinkRef<T,N,K,A,H,M>>> {
-        NonNoneMut::new(&mut self.0)
-    }
-
-    fn is_empty(&self) -> bool {
-        self.0.is_none()
-    }
 }
 
-impl<T: Digestible, const N: usize, const K: usize, A: Allocator + Clone, H: Digest, M: TrieMode> Node<T,N,K,A,H,M> {
-    /// Constructs a new branch node for this trie
-    pub(crate) fn new_branch(key: Box<[u8],A>, mask: u8) -> Self {
+impl<T: Digestible, const N: usize, const K: usize, H:Digest, A: Allocator + Clone, M: TrieMode> Node<T,N,K,H,A,M> {
+    /// Construct a new branch node for this trie
+    pub(super) fn new_branch(key: Box<[u8],A>, mask: u8) -> Self {
         Self { key, kind: Kind::Branch { mask, children: [const { NodeLink(None) }; K] }}
     }
 
-    /// Constructs a new leaf node for this trie
-    pub(crate) fn new_leaf(key: Box<[u8],A>, value: T) -> Self {
+    /// Construct a new leaf node for this trie
+    pub(super) fn new_leaf(key: Box<[u8],A>, value: T) -> Self {
         Self { key, kind: Kind::Leaf { value, _phantom: std::marker::PhantomData }}
     }
 
-    /// Upserts a child node into the current node at the given slot.
+    /// Implement [`Trie::digest`] in a way that only requires examining the local node.
+    pub(super) fn digest(&self) -> Output<H> {
+        match &self.kind {
+            Kind::Opaque(hash, _marker) => hash.clone(),
+            Kind::Leaf { value, .. } => {
+                let mut hasher = H::new();
+                Digest::update(&mut hasher, &self.key);
+                value.update_hasher(&mut hasher);
+                hasher.finalize()
+            }
+            Kind::Branch { mask, children } => {
+                let mut hasher = H::new();
+                Digest::update(&mut hasher, &self.key);
+                Digest::update(&mut hasher, [*mask]);
+                for child in children {
+                    Digest::update(&mut hasher, child.stored_digest())
+                }
+                hasher.finalize()
+            }
+        }
+    }
+
+    /// Upsert a child node into the current node at the given slot.
     /// 
     /// SAFTEY: must ensure caller node has [`Kind::Branch`].
     #[inline]
@@ -304,81 +314,23 @@ impl<T: Digestible, const N: usize, const K: usize, A: Allocator + Clone, H: Dig
         self.key.len()*8 - extra_bits as usize
     }
 
-    pub fn value(&self) -> Option<&T> {
+    /// Return a reference to the value
+    fn value_ref(&self) -> Option<&T> {
         match &self.kind {
             Kind::Leaf { value, .. } => Some(value),
             _ => None,
         }
     }
 
-    /// Returns the number of children stored under this node
-    pub fn is_terminal(&self) -> bool {
+    /// Return the number of children stored under this node
+    fn is_terminal(&self) -> bool {
         matches!(self.kind, Kind::Branch { .. })
     }
-
-    /// The internal implementation of [`Trie::digest`] that only requires examining the local node.
-    pub fn digest(&self) -> Output<H> {
-        match &self.kind {
-            Kind::Opaque(hash, _marker) => hash.clone(),
-            Kind::Leaf { value, .. } => {
-                let mut hasher = H::new();
-                Digest::update(&mut hasher, &self.key);
-                value.digest_update(&mut hasher);
-                hasher.finalize()
-            }
-            // NOTE: the count field does not contribute to the digest since
-            // it is just a read-only view over the children field
-            Kind::Branch { mask, children } => {
-                let mut hasher = H::new();
-                Digest::update(&mut hasher, &self.key);
-                Digest::update(&mut hasher, [*mask]);
-                for child in children {
-                    Digest::update(&mut hasher, child.stored_digest())
-                }
-                hasher.finalize()
-            }
-        }
-    }
 }
 
-
-impl<T: Digestible + Debug, const N: usize, const K: usize, A: Allocator + Clone, H: Digest, M: TrieMode> NodeLink<T,N,K,A,H,M> {
-    /// This function drives the [`Debug`] implementation for [`Trie`].
-    pub(crate) fn debug_fmt(&self, depth: usize, child_num: Option<usize>, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let space = " ".repeat(depth*2);
-        write!(f, "{}", space)?;
-        if let Some(child_num) = child_num {
-            write!(f, "{:>3}: ", child_num)?;
-        }
-        if let Some((hash, node)) = self.0.as_ref() {
-            write!(f, "{} -> ", HashFrag::<H>(hash))?;
-            match &node.kind {
-                Kind::Leaf { value, .. } => {
-                    write!(f, "L({}, {:?})", to_bin::<false>(&node.key), value)
-                }
-                Kind::Branch { mask, children, .. } => {
-                    write!(f, "B({}, {}, ", to_bin::<false>(&node.key), to_bin::<false>(&[*mask]))?;
-                    for (idx, child) in children.iter().enumerate() {
-                        write!(f, "\n")?;
-                        Self::debug_fmt(&child, depth+1, Some(idx), f)?;
-                    }
-                    write!(f, "\n{})", space)
-                }
-                Kind::Opaque(..) => write!(f, "O({})", HashFrag::<H>(hash))
-            }
-        } else {
-            if depth == 0 {
-                write!(f, "Trie(Empty)")
-            } else {
-                write!(f, "E")
-            }
-        }
-    }
-}
-
-impl<T: Digestible, const N: usize, const K: usize, A: Allocator + Clone, H: Digest> Node<T,N,K,A,H,Complete> {
-    /// The internal implementation of [`Trie::to_partial`]
-    pub fn to_partial(self) -> Node<T,N,K,A,H,Partial> {
+impl<T: Digestible, const N: usize, const K: usize, A: Allocator + Clone, H: Digest> NodeLink<T,N,K,H,A,Complete> {
+    /// Reinterpret a [`NodeLink`] in-place
+    pub(crate) fn to_partial(self) -> NodeLink<T,N,K,H,A,Partial> {
         // SAFETY: Kind is #[repr(C, u8)] and Node/BranchData are #[repr(C)], and the
         // only field whose type varies with the mode (`Kind::Opaque`'s second field,
         // `M::Marker`) is a zero-sized tag, so it never affects the enum's size --
@@ -393,32 +345,27 @@ impl<T: Digestible, const N: usize, const K: usize, A: Allocator + Clone, H: Dig
         // A" even though A is identical on both sides). `transmute_copy` performs
         // the same bit-for-bit reinterpretation without that compile-time check, so
         // the `const` assertion below is what actually carries the safety proof.
-        const {
-            assert!(std::mem::size_of::<Self>() == std::mem::size_of::<Node<T,N,K,A,H,Partial>>());
-            assert!(std::mem::align_of::<Self>() == std::mem::align_of::<Node<T,N,K,A,H,Partial>>());
-        };
-        let this = std::mem::ManuallyDrop::new(self);
-        unsafe { std::mem::transmute_copy(&this) }
-    }
-
-    /// Boxed variant of [`Self::to_partial`], reinterpreting `Box<Self,A>` in place without
-    /// unboxing/reboxing so the allocation is reused as-is.
-    pub fn to_partial_boxed(this: Box<Self,A>) -> Box<Node<T,N,K,A,H,Partial>,A> {
-        // SAFETY: see `to_partial` -- Self and Node<T,N,K,A,H,Partial> are layout-identical,
+        // SAFETY: see `to_partial` -- Self and Node<T,N,K,H,A,Partial> are layout-identical,
         // so the pointee behind the box may be reinterpreted; the allocator is threaded
         // through unchanged so the box can later be freed in the same allocator it came from.
         const {
-            assert!(std::mem::size_of::<Self>() == std::mem::size_of::<Node<T,N,K,A,H,Partial>>());
-            assert!(std::mem::align_of::<Self>() == std::mem::align_of::<Node<T,N,K,A,H,Partial>>());
+            assert!(std::mem::size_of::<Self>() == std::mem::size_of::<Node<T,N,K,H,A,Partial>>());
+            assert!(std::mem::align_of::<Self>() == std::mem::align_of::<Node<T,N,K,H,A,Partial>>());
         };
-        let (raw, alloc) = Box::into_raw_with_allocator(this);
-        unsafe { Box::from_raw_in(raw as *mut Node<T,N,K,A,H,Partial>, alloc) }
+        if let NodeLink(Some((digest, complete_node))) = self {
+            let (raw, alloc) = Box::into_raw_with_allocator(complete_node);
+            let partial_node = unsafe { Box::from_raw_in(raw as *mut Node<T,N,K,H,A,Partial>, alloc) };
+            NodeLink(Some((digest, partial_node)))
+        } else {
+            NodeLink(None)
+        }
     }
 }
 
-impl<T: Digestible, const N: usize, const K: usize, A: Allocator + Clone, H: Digest> NodeLink<T,N,K,A,H,Partial> {
-    /// The internal implementation of [`Trie::witness_for_keys`]
-    pub fn witness_for_keys(&mut self, mut keys: Vec<&[u8]>) {
+impl<T: Digestible, const N: usize, const K: usize, A: Allocator + Clone, H: Digest> NodeLink<T,N,K,H,A,Partial> {
+    /// Implement [`Trie::witness_for_keys`] via visiting every node reachable
+    /// by a key in `keys` and then pruning all nodes that are not reachable in this manner
+    pub(super) fn witness_for_keys(&mut self, mut keys: Vec<&[u8]>) {
         keys.sort();
         keys.dedup();
         let keys: Vec<_> = keys.into_iter().map(|k| (k, 0)).collect();
@@ -462,7 +409,7 @@ impl<T: Digestible, const N: usize, const K: usize, A: Allocator + Clone, H: Dig
                     })
                 };
 
-                let (_, node) = link.deref_mut().expect("internal error: already checked option");
+                let (_, node) = link.0.as_mut().expect("internal error: already checked option");
                 // SAFETY: we verified this node is a branch in the num_children check
                 // we cannot move this above because this conflicts with the borrow from `node.find` above
                 let children = match &mut node.kind {
@@ -504,9 +451,10 @@ mod witness_tests {
     use allocator_api2::alloc::Global;
     use sha2::Sha256;
     use test_log::test;
-    use crate::merkle::types::{Complete, Kind, Node, Trie};
+    use crate::merkle::types::{Complete, Trie};
+    use crate::merkle::internal::empty_hash;
 
-    type U64BinaryTrie = Trie<u64,4,2,Global,Sha256,Complete>;
+    type U64BinaryTrie = Trie<u64,4,2,Sha256,Global,Complete>;
 
     #[test]
     fn initial_node_has_initial_key() {
@@ -519,38 +467,31 @@ mod witness_tests {
         assert_eq!(&*node.key, initial_key);
     }
 
-    // Regression test for `to_witness`'s transmute: a plain `cargo build` type-checks
-    // the generic definition but never monomorphizes it (nothing in the crate calls
-    // it), so a transmute that's unsound - or that simply fails to compile - for a
-    // concrete instantiation can hide behind a green build. Instantiating it here
-    // with a concrete allocator and hasher is what actually exercises the check.
     #[test]
     fn preserves_key_and_digest() {
         let mut t: U64BinaryTrie = Trie::new();
         t.set(&[1,2,3,], 42).unwrap();
-        let leaf: Node<u64, 4, 2, Global, Sha256, Complete> = Node {
-            key: crate::utils::copy_slice_into_box(&[1, 2, 3], Global),
-            kind: Kind::Leaf { value: 42u64, _phantom: std::marker::PhantomData },
-        };
-        let digest_before = leaf.digest();
-        let key_before = leaf.key.to_vec();
-
-        let witness = leaf.to_partial();
-
-        assert_eq!(witness.key.to_vec(), key_before);
+        let digest_before = t.digest();
+        let witness = t.clone().to_partial();
         assert_eq!(witness.digest(), digest_before);
+        assert_eq!(t.get(&[1,2,3]), witness.get(&[1,2,3]));
     }
 
     #[test]
     fn test_delete() {
         let mut t: U64BinaryTrie = Trie::new();
+        println!("Empty: {t:?}");
         t.set(&[1,2,3,], 42).unwrap();
         let orig = t.clone();
         println!("With 42: {t:?}");
         t.set(&[1,2,4,], 43).unwrap();
         println!("With 43: {t:?}");
         t.delete(&[1,2,4]).unwrap();
-        assert!(orig.weak_eq(&t), "Original and Deleted tries are unequal:\n{orig:?}\n{t:?}");
+        assert!(orig.hash_eq(&t), "Original and Deleted tries are unequal:\n{orig:?}\n{t:?}");
+        println!("With 42: {t:?}");
+        t.delete(&[1,2,3]).unwrap();
+        assert_eq!(t.digest(), empty_hash::<Sha256>());
+        println!("Final: {t:?}");
     }
 
     #[test]

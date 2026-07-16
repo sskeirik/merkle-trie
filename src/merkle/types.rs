@@ -1,4 +1,21 @@
 /// Defines the Merkle Trie type structure
+
+/* TODO:
+ *
+ * We want to revamp API to:
+ * 
+ * 1. make node internals private to prevent arbitrary access
+ * 2. limit mut internal access to a few safe functions:
+ *    - create_leaf_at_root - crates new leaf with complete key node --- always safe
+ *    - opaqueify - makes node opaque --- always safe
+ *    - create_leaf_at_branch - creates new leaf with complete key node --- always safe IF we fixup ptr hash
+ *    - overwite value - overwrites leaf value --- always safe IF we fixup ptr hash
+ *    - split_node - takes node with disagreement and splits it --- always safe IF we fixup ptr hash
+ * 3. ensure only probe/probe_mut need to understand how to walk trie, like we already do
+ * 4. replace closure argument in probe_mut with action selector
+ * 5. optionally, make probe have a matching structure 
+ * 
+ */
 use digest::{Digest, Output};
 
 use crate::digestible::Digestible;
@@ -20,7 +37,7 @@ use crate::utils::{Allocator, Box};
 ///
 /// If `T` also implements [`Debug`]/[`Clone`], then [`Trie`] will implements [`Debug`]/[`Clone`].
 #[derive(Clone)]
-pub struct Trie<T: Digestible, const N: usize, const K: usize, A: Allocator + Clone, H: Digest, M: TrieMode>(pub(crate) A, pub(crate) NodeLink<T,N,K,A,H,M>);
+pub struct Trie<T: Digestible, const N: usize, const K: usize, H: Digest, A: Allocator + Clone, M: TrieMode>(pub(crate) A, pub(crate) NodeLink<T,N,K,H,A,M>);
 
 /// A node in a Merkleized, compressed trie.
 /// 
@@ -31,11 +48,11 @@ pub struct Trie<T: Digestible, const N: usize, const K: usize, A: Allocator + Cl
 /// for [`Trie`] introspection.
  #[derive(Clone)]
  #[repr(C)]
-pub struct Node<T: Digestible, const N: usize, const K: usize, A: Allocator + Clone, H: Digest, M: TrieMode> {
+pub struct Node<T: Digestible, const N: usize, const K: usize, H: Digest, A: Allocator + Clone, M: TrieMode> {
     /// the whole bytes that must be matched to visit this node
     pub key: Box<[u8],A>,
     /// the node's kind-specific data
-    pub kind: Kind<T,N,K,A,H,M>,
+    pub kind: Kind<T,N,K,H,A,M>,
 }
 
 /// A generic Merkle trie node payload
@@ -47,13 +64,13 @@ pub struct Node<T: Digestible, const N: usize, const K: usize, A: Allocator + Cl
 /// for [`Trie`] introspection.
 #[derive(Clone)]
 #[repr(C, u8)]
-pub enum Kind<T: Digestible, const N: usize, const K: usize, A: Allocator + Clone, H: Digest, M: TrieMode> {
+pub enum Kind<T: Digestible, const N: usize, const K: usize, H: Digest, A: Allocator + Clone, M: TrieMode> {
     /// A trie branch
     Branch {
         /// Encodes the log2(`K`) bits in the [`Node::key`]`.len()`th byte that distinguishes the keys of child nodes
         mask: u8,
         /// Stores the `K` child nodes of this branch
-        children: [NodeLink<T,N,K,A,H,M>; K],
+        children: [NodeLink<T,N,K,H,A,M>; K],
     },
     /// A trie leaf
     Leaf {
@@ -67,12 +84,12 @@ pub enum Kind<T: Digestible, const N: usize, const K: usize, A: Allocator + Clon
 }
 
 /// The hash reference contained inside a [`NodeLink`]
-pub type NodeLinkRef<T,const N: usize, const K: usize, A, H, M> = (Output<H>, Box<Node<T,N,K,A,H,M>, A>);
+pub type NodeLinkRef<T,const N: usize, const K: usize, H, A, M> = (Output<H>, Box<Node<T,N,K,H,A,M>, A>);
 
 /// A nullable link between [`Node`]s in a [`Trie`]
 #[derive(Clone)]
-pub struct NodeLink<T: Digestible, const N: usize, const K: usize, A: Allocator + Clone, H: Digest, M: TrieMode>(
-    pub Option<NodeLinkRef<T,N,K,A,H,M>>,
+pub struct NodeLink<T: Digestible, const N: usize, const K: usize, H: Digest, A: Allocator + Clone, M: TrieMode>(
+    pub Option<NodeLinkRef<T,N,K,H,A,M>>,
 );
 
 // implement opaque trie node partial type
@@ -161,5 +178,96 @@ impl<T> NodeUpdate<T> for NodeUpsert<T> {
 
     fn on_vacant(self) -> Option<T> {
         Some(self.value)
+    }
+}
+
+mod basic_trait_impls {
+    use super::*;
+    use std::fmt::Debug;
+    use crate::digestible::HashFrag;
+    #[allow(unused_imports)] // debugging or doc-comments
+    use crate::utils::{to_ascii, to_bin, to_hex};
+
+    /// Trie/node equality is just equality of its node structure
+    impl<T: Digestible + PartialEq + Eq, const N: usize, const K: usize, H: Digest, A: Allocator + Clone, M: TrieMode> PartialEq for Trie<T,N,K,H,A,M> {
+        fn eq(&self, other: &Self) -> bool {
+            self.1 == other.1
+        }
+    }
+
+    /// Trie/node equality is just equality of its node structure.
+    impl<T: Digestible + PartialEq + Eq, const N: usize, const K: usize, H:Digest, A: Allocator + Clone, M: TrieMode> PartialEq for NodeLink<T,N,K,H,A,M> {
+        fn eq(&self, other: &Self) -> bool {
+            use Kind::*;
+            match (&self.0, &other.0) {
+                (Some((_, node1)), Some((_, node2))) => {
+                    node1.key == node2.key && match (&node1.kind, &node2.kind) {
+                        (Leaf { value: v1, ..  }, Leaf { value: v2, .. }) => v1 == v2,
+                        (Opaque(digest1, _), Opaque(digest2, _)) => digest1 == digest2,
+                        (Branch { mask: m1, children: c1 }, Branch { mask: m2, children: c2 }) => {
+                            m1 == m2 && c1.iter().zip(c2.iter()).all(|(c1, c2)| c1 == c2 )
+                        }
+                        (_, _) => false,
+                    }
+                }
+                (None, None) => true,
+                _ => false,
+            }
+        }
+    }
+
+    /// The debug format of a Merkle trie/node is a nested presentation of the trie structure
+    impl<T: Digestible + Debug, const N: usize, const K: usize, H:Digest, A: Allocator + Clone, M: TrieMode> Debug for Trie<T,N,K,H,A,M> {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            self.1.debug_fmt( 0, None, f)
+        }
+    }
+
+    /// The debug format of a Merkle trie/node is a nested presentation of the trie structure
+    impl<T: Digestible + Debug, const N: usize, const K: usize, H:Digest, A: Allocator + Clone, M: TrieMode> Debug for NodeLink<T,N,K,H,A,M> {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            self.debug_fmt( 0, None, f)
+        }
+    }
+
+    impl<T: Digestible + Debug, const N: usize, const K: usize, H:Digest, A: Allocator + Clone, M: TrieMode> NodeLink<T,N,K,H,A,M> {
+        /// This function drives the [`Debug`] implementation for [`Trie`].
+        pub(crate) fn debug_fmt(&self, depth: usize, child_num: Option<usize>, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            let space = " ".repeat(depth*2);
+            write!(f, "{}", space)?;
+            if let Some(child_num) = child_num {
+                write!(f, "{:>3}: ", child_num)?;
+            }
+            if let Some((hash, node)) = self.0.as_ref() {
+                write!(f, "{} -> ", HashFrag::<H>(hash))?;
+                match &node.kind {
+                    Kind::Leaf { value, .. } => {
+                        write!(f, "L({}, {:?})", to_bin::<false>(&node.key), value)
+                    }
+                    Kind::Branch { mask, children, .. } => {
+                        write!(f, "B({}, {}, ", to_bin::<false>(&node.key), to_bin::<false>(&[*mask]))?;
+                        for (idx, child) in children.iter().enumerate() {
+                            write!(f, "\n")?;
+                            Self::debug_fmt(&child, depth+1, Some(idx), f)?;
+                        }
+                        write!(f, "\n{})", space)
+                    }
+                    Kind::Opaque(..) => write!(f, "O({})", HashFrag::<H>(hash))
+                }
+            } else {
+                if depth == 0 {
+                    write!(f, "Trie(Empty)")
+                } else {
+                    write!(f, "E")
+                }
+            }
+        }
+    }
+
+    /// The digest of a Merkle trie is just the digest of its root hash
+    impl<T: Digestible, const N: usize, const K: usize, H:Digest, A: Allocator + Clone, M: TrieMode> Digestible for Trie<T,N,K,H,A,M> {
+        fn update_hasher<D: Digest>(&self, hasher: &mut D) {
+            hasher.update(self.digest());
+        }
     }
 }

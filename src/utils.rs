@@ -9,9 +9,8 @@ pub use allocator_api2::{boxed::Box, alloc::Allocator};
 pub use std::{boxed::Box, alloc::Allocator};
 use std::fmt::Write;
 
+/// A shared reference to an [`Option`] that must be non-`None`
 pub struct NonNone<'a,T>(&'a Option<T>);
-pub struct NonNoneMut<'a,T>(&'a mut Option<T>);
-
 impl<'a,T> NonNone<'a,T> {
     pub fn new(opt: &'a Option<T>) -> Option<Self> {
         if opt.is_none() {
@@ -20,21 +19,21 @@ impl<'a,T> NonNone<'a,T> {
         return Some(Self(opt))
     }
 
-    pub unsafe fn assume(opt: &'a Option<T>) -> Self {
-        return Self(opt)
-    }
-
+    /// Return a shared reference to the inner value
     pub fn get(&self) -> &'a T {
         // SAFETY: by construction
         let opt_ref = self.0.as_ref();
         unsafe { opt_ref.unwrap_unchecked() }
     }
 
+    /// Consume the [`NonNone`] and obtain its contents
     pub fn into_inner(self) -> &'a Option<T> {
         self.0
     }
 }
 
+/// A mutable reference to an [`Option`] that must be non-`None`
+pub struct NonNoneMut<'a,T>(&'a mut Option<T>);
 impl<'a,T> NonNoneMut<'a,T> {
     pub fn new(opt: &'a mut Option<T>) -> Option<Self> {
         if opt.is_none() {
@@ -43,26 +42,26 @@ impl<'a,T> NonNoneMut<'a,T> {
         return Some(Self(opt))
     }
 
-    pub unsafe fn assume(opt: &'a mut Option<T>) -> Self {
-        return Self(opt)
-    }
-
+    /// Return a shared reference to the inner value as a reborrow
     pub fn as_ref(&self) -> &T {
         // SAFETY: by construction
         let opt_ref = self.0.as_ref();
         unsafe { opt_ref.unwrap_unchecked() }
     }
 
+    /// Return a mutable reference to the inner value as a reborrow
     pub fn as_mut(&mut self) -> &mut T {
         // SAFETY: by construction
         let opt_ref = self.0.as_mut();
         unsafe { opt_ref.unwrap_unchecked() }
     }
 
+    /// Consume the [`NonNoneMut`] and obtain its contents
     pub fn into_inner(self) -> &'a mut Option<T> {
         self.0
     }
 
+    /// Consume the [`NonNoneMut`] and obtain a mutable reference its inner value
     pub fn into_mut(self) -> &'a mut T {
         let opt_mut = self.0.as_mut();
         // SAFETY: by construction
@@ -90,39 +89,6 @@ pub fn copy_slice_into_box<A: Allocator>(src: &[u8], alloc: A) -> Box<[u8], A> {
         );
         boxed.assume_init()
     }
-}
-
-/// Evaluate an expression, log it via `tracing`, and return it unchanged.
-///
-/// Forms:
-///   trace_val!(expr)                              // DEBUG, records `value = ?expr`
-///   trace_val!(LEVEL, expr)                       // same, at LEVEL
-///   trace_val!(name = expr, "fmt")                // DEBUG; format may use {name} + scope vars
-///   trace_val!(LEVEL, name = expr, "fmt", ...)    // same, at LEVEL, with extra args/fields
-///
-/// The two-argument form `trace_val!(a, b)` treats `a` as the level and `b` as the value.
-#[macro_export]
-macro_rules! trace_val {
-    ($expr:expr $(,)?) => {{
-        let value = $expr;
-        ::tracing::event!(::tracing::Level::DEBUG, ?value);
-        value
-    }};
-    ($name:ident = $expr:expr, $($fmt:tt)+) => {{
-        let $name = $expr;
-        ::tracing::event!(::tracing::Level::DEBUG, $($fmt)+);
-        $name
-    }};
-    ($lvl:expr, $expr:expr $(,)?) => {{
-        let value = $expr;
-        ::tracing::event!($lvl, ?value);
-        value
-    }};
-    ($lvl:expr, $name:ident = $expr:expr, $($fmt:tt)+) => {{
-        let $name = $expr;
-        ::tracing::event!($lvl, $($fmt)+);
-        $name
-    }};
 }
 
 /// Print a byte string as ASCII characters
