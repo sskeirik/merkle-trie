@@ -83,9 +83,9 @@ pub mod mode {
 }
 
 /// Trait that describes whether a [`Trie`] may be partial
-/// (i.e., may contain [`Kind::Opaque`] nodes).
+/// (i.e., may contain opaque nodes).
 pub trait TrieMode: sealed::SealedTrieMode {
-    /// ZST tag stored in [`Kind::Opaque`] nodes.
+    /// ZST tag stored in opaque nodes.
     /// In [`Complete`] tries, resolves to the empty type
     /// (preventing construction of opaque nodes).
     type Marker: Clone;

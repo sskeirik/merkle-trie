@@ -95,14 +95,14 @@ impl<T> NodeUpdate<T> for NodeUpsert<T> {
 ///
 /// We describe its generic paramters below:
 ///
-/// | Param | Bounds                     | Description                                                             |
-/// | ---   | ---                        | ---                                                                     |
-/// | `T`   | [`Digestible`]             | The value type stored in this trie                                      |
-/// | `N`   | [`usize`]                  | Max key length in bytes                                                 |
-/// | `K`   | [`usize`]                  | Node branching factor (2,4,16,256 - powers of two for fast bitwise ops) |
-/// | `H`   | [`Digest`]                 | The hash function used for hash pointers                                |
-/// | `A`   | [`Allocator`] + [`Clone`]  | The allocator used to store keys/values/nodes                           |
-/// | `M`   | [`TrieMode`]               | Either `Complete` or `Partial` which enables `Opaque` nodes             |
+/// | Param | Bounds                    | Description                                                                                |
+/// | ---   | ---                       | ---                                                                                        |
+/// | `T`   | [`Digestible`]            | The value type stored in this trie                                                         |
+/// | `N`   | [`usize`]                 | Max key length in bytes                                                                    |
+/// | `K`   | [`usize`]                 | Node branching factor (must choose 2,4,16, or 256 - powers of two ensure fast bitwise ops) |
+/// | `H`   | [`Digest`]                | The hash function used for hash pointers                                                   |
+/// | `A`   | [`Allocator`] + [`Clone`] | The allocator used to store keys/values/nodes                                              |
+/// | `M`   | [`TrieMode`]              | Either [`Complete`] or [`Partial`] which enables `Opaque` nodes                            |
 ///
 /// For dense tries, higher branching factors can reduce size overhead.
 ///

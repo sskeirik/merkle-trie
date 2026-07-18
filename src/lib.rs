@@ -9,11 +9,11 @@ mod node;
 
 // Public re-exports
 pub use trie::{Trie, TrieError, NodeUpdate};
-pub use node::{Complete, Partial};
+pub use node::{TrieMode, Complete, Partial};
 pub use digestible::Digestible;
+pub use digest::Digest;
 
 #[allow(unused_imports)] // for doc-comments
 use {
-    digest::Digest,
     utils::Allocator,
 };

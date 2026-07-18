@@ -36,6 +36,7 @@ Expanding upon the summary sentence in more detail, we have:
    | `K`   | [`usize`]                 | Node branching factor (must choose 2,4,16, or 256 - powers of two ensure fast bitwise ops) |
    | `H`   | [`Digest`]                | The hash function used for hash pointers                                                   |
    | `A`   | [`Allocator`] + [`Clone`] | The allocator used to store keys/values/nodes                                              |
+   | `M`   | [`TrieMode`]               | Either [`Complete`] or [`Partial`] which enables `Opaque` nodes                           |
 
    For dense tries, higher branching factors can reduce size overhead.
 
@@ -50,6 +51,41 @@ For implementation simplicity:
 ## Cargo Features
 
 - `std_allocator_api` - defines `Allocator` as `std::alloc::Allocator` (currently requires nightly Rust); if unset, the `allocator-api2` shim package is used instead.
+
+## Example Code
+
+```rust
+use allocator_api2::alloc::Global;
+use sha2::Sha256;
+use merkle_trie::{Trie,Complete,Digest,Digestible};
+
+#[derive(Debug)]
+struct MyCustomData(u64);
+impl Digestible for MyCustomData {
+    fn update_hasher<D: Digest>(&self, hasher: &mut D) {
+        hasher.update(&self.0.to_le_bytes())
+    }
+}
+
+type MyTrie = Trie<MyCustomData,4,2,Sha256,Global,Complete>;
+
+let mut t: MyTrie = Trie::new();
+t.set(&[1,2,3], MyCustomData(45));
+t.set(&[1,2,4], MyCustomData(78));
+t.set(&[1,2,5], MyCustomData(127));
+let delete_result = t.delete(&[1,2,4]);
+match delete_result {
+   Ok(v) => println!("Old value at key was {v:?}"),
+   Err(e) => println!("Error {e} occurred"),
+};
+let get_result = t.get(&[1,2,3]);
+match get_result {
+   Ok(v) => println!("Borrow a value: {v:?}"),
+   Err(e) => println!("Error {e} occurred"),
+}
+
+let mut witness = t.to_partial();
+``` 
 
 ## Details
 
