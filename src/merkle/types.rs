@@ -37,7 +37,7 @@ use crate::utils::{Allocator, Box};
 ///
 /// If `T` also implements [`Debug`]/[`Clone`], then [`Trie`] will implements [`Debug`]/[`Clone`].
 #[derive(Clone)]
-pub struct Trie<T: Digestible, const N: usize, const K: usize, H: Digest, A: Allocator + Clone, M: TrieMode>(pub(crate) A, pub(crate) NodeLink<T,N,K,H,A,M>);
+pub struct Trie<T: Digestible, const N: usize, const K: usize, H: Digest, A: Allocator + Clone, M: TrieMode>(pub(super) A, pub(super) NodeLink<T,N,K,H,A,M>);
 
 /// A node in a Merkleized, compressed trie.
 /// 
@@ -48,7 +48,7 @@ pub struct Trie<T: Digestible, const N: usize, const K: usize, H: Digest, A: All
 /// for [`Trie`] introspection.
  #[derive(Clone)]
  #[repr(C)]
-pub struct Node<T: Digestible, const N: usize, const K: usize, H: Digest, A: Allocator + Clone, M: TrieMode> {
+pub(super) struct Node<T: Digestible, const N: usize, const K: usize, H: Digest, A: Allocator + Clone, M: TrieMode> {
     /// the whole bytes that must be matched to visit this node
     pub key: Box<[u8],A>,
     /// the node's kind-specific data
@@ -64,7 +64,7 @@ pub struct Node<T: Digestible, const N: usize, const K: usize, H: Digest, A: All
 /// for [`Trie`] introspection.
 #[derive(Clone)]
 #[repr(C, u8)]
-pub enum Kind<T: Digestible, const N: usize, const K: usize, H: Digest, A: Allocator + Clone, M: TrieMode> {
+pub(super) enum Kind<T: Digestible, const N: usize, const K: usize, H: Digest, A: Allocator + Clone, M: TrieMode> {
     /// A trie branch
     Branch {
         /// Encodes the log2(`K`) bits in the [`Node::key`]`.len()`th byte that distinguishes the keys of child nodes
@@ -84,11 +84,11 @@ pub enum Kind<T: Digestible, const N: usize, const K: usize, H: Digest, A: Alloc
 }
 
 /// The hash reference contained inside a [`NodeLink`]
-pub type NodeLinkRef<T,const N: usize, const K: usize, H, A, M> = (Output<H>, Box<Node<T,N,K,H,A,M>, A>);
+pub(super) type NodeLinkRef<T,const N: usize, const K: usize, H, A, M> = (Output<H>, Box<Node<T,N,K,H,A,M>, A>);
 
 /// A nullable link between [`Node`]s in a [`Trie`]
 #[derive(Clone)]
-pub struct NodeLink<T: Digestible, const N: usize, const K: usize, H: Digest, A: Allocator + Clone, M: TrieMode>(
+pub(super) struct NodeLink<T: Digestible, const N: usize, const K: usize, H: Digest, A: Allocator + Clone, M: TrieMode>(
     pub Option<NodeLinkRef<T,N,K,H,A,M>>,
 );
 
@@ -165,7 +165,7 @@ pub trait NodeUpdate<T> {
 }
 
 /// Implements [`NodeUpdate`] by upserting [`Self::value`].
-pub struct NodeUpsert<T> {
+pub(super) struct NodeUpsert<T> {
     /// The value to be upserted.
     pub value: T
 }

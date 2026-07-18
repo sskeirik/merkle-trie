@@ -13,7 +13,7 @@ use {
 };
 
 /// A probe result to be handled by a probe action
-pub enum ProbeResult<L,N> {
+enum ProbeResult<L,N> {
     /// An empty child slot corresponding to the probe key was found at N
     EmptySlot(L),
     /// An exact match for the probe key was found at N
@@ -330,7 +330,7 @@ impl<T: Digestible, const N: usize, const K: usize, H:Digest, A: Allocator + Clo
 
 impl<T: Digestible, const N: usize, const K: usize, A: Allocator + Clone, H: Digest> NodeLink<T,N,K,H,A,Complete> {
     /// Reinterpret a [`NodeLink`] in-place
-    pub(crate) fn to_partial(self) -> NodeLink<T,N,K,H,A,Partial> {
+    pub(super) fn to_partial(self) -> NodeLink<T,N,K,H,A,Partial> {
         // SAFETY: Kind is #[repr(C, u8)] and Node/BranchData are #[repr(C)], and the
         // only field whose type varies with the mode (`Kind::Opaque`'s second field,
         // `M::Marker`) is a zero-sized tag, so it never affects the enum's size --
