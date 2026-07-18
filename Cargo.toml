@@ -6,8 +6,6 @@ edition = "2024"
 [dependencies]
 allocator-api2 = "0.4.0"
 digest = "0.11.3"
-either = "1.15.0"
-itertools = "0.15.0"
 tracing = { version = "0.1.44", features = ["release_max_level_info"] }
 
 [dev-dependencies]
@@ -15,4 +13,4 @@ sha2 = "0.11.0"
 test-log = { version = "0.2.20", features = ["color", "log", "trace"] }
 
 [features]
-nightly = []
+std_allocator_api = []

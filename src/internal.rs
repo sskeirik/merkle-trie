@@ -1,15 +1,16 @@
-/// Defines the Merkle Trie operations
+//! Internal Merkle [`Trie`] operations.
 use std::collections::HashMap;
 use digest::{Digest, Output};
 use crate::digestible::{Digestible, HashFrag, empty_hash};
-use crate::merkle::types::{TrieMode, Node, NodeLink, NodeLinkRef, NodeUpdate, Kind};
-use crate::merkle::types::mode::*;
+use crate::types::{TrieMode, Node, NodeLink, NodeLinkInner, NodeUpdate, Kind, TrieError};
+use crate::types::mode::*;
 use crate::utils::{Allocator, Box, NonNone, NonNoneMut, pick_mut_unchecked};
 use crate::bitseqops::{BitDiff, BitPosition, BitSeqOps, find_first_distinct_bits};
 #[allow(unused_imports)] // debugging or doc-comments
 use {
     tracing::{instrument, debug},
-    crate::utils::{to_ascii, to_bin, to_hex},
+    super::utils::{to_ascii, to_bin, to_hex},
+    super::Trie,
 };
 
 /// A probe result to be handled by a probe action
@@ -30,7 +31,7 @@ impl<T: Digestible, const N: usize, const K: usize, H:Digest, A: Allocator + Clo
 
     /// Probe the trie, optionally with a bound, applying a user-specified action when the probe terminates
     #[instrument(level="debug", skip(self, bound, key, action))]
-    fn probe<'a, R>(&'a self, mut bound: Option<usize>, key: &[u8], pos: BitPosition, action: impl FnOnce(BitPosition, ProbeResult<(), NonNone<'a,NodeLinkRef<T,N,K,H,A,M>>>) -> R) -> R {
+    fn probe<'a, R>(&'a self, mut bound: Option<usize>, key: &[u8], pos: BitPosition, action: impl FnOnce(BitPosition, ProbeResult<(), NonNone<'a,NodeLinkInner<T,N,K,H,A,M>>>) -> R) -> R {
         let label = if cfg!(debug_assertions) { self.debug_label() } else { const { String::new() } };
 
         let Some(opt_ref) = self.as_opt_ref() else {
@@ -67,7 +68,7 @@ impl<T: Digestible, const N: usize, const K: usize, H:Digest, A: Allocator + Clo
 
     /// Probe the trie mutably, optionally with a bound, applying a user-specified action when the probe terminates that may modify the trie
     #[instrument(level="debug", skip(self, bound, key, action, alloc))]
-    fn probe_mut<R>(&mut self, alloc: A, mut bound: Option<usize>, key: &[u8], pos: BitPosition, action: impl for <'a> FnOnce(BitPosition, ProbeResult<&'a mut Self, NonNoneMut<'a,NodeLinkRef<T,N,K,H,A,M>>>) -> R) -> R {
+    fn probe_mut<R>(&mut self, alloc: A, mut bound: Option<usize>, key: &[u8], pos: BitPosition, action: impl for <'a> FnOnce(BitPosition, ProbeResult<&'a mut Self, NonNoneMut<'a,NodeLinkInner<T,N,K,H,A,M>>>) -> R) -> R {
         let label = if cfg!(debug_assertions) { self.debug_label() } else { const { String::new() } };
 
         let Some(mut opt_mut) = self.as_opt_mut() else {
@@ -97,7 +98,10 @@ impl<T: Digestible, const N: usize, const K: usize, H:Digest, A: Allocator + Clo
                 let pre_full = child.0.is_some();
                 let result = child.probe_mut(alloc.clone(), bound, key, split.pos, action);
                 let post_empty = child.0.is_none();
-                // is child count delta non-zero?
+                // TODO: Consider implementation options that add a branch size counter and only
+                //       perform this linear scan when the branch size counter hits zero.
+                //       This is not currently done not because it can't be made to work but
+                //       because I didn't find an implementation style that I liked.
                 let to_merge_child = if pre_full & post_empty {
                     // if one child remains, perform merge
                     let mut child_data = None;
@@ -133,10 +137,10 @@ impl<T: Digestible, const N: usize, const K: usize, H:Digest, A: Allocator + Clo
     }
 
     /// Implement [`Trie::update`] as a thin wrapper around `Self::probe_mut`.
-    pub(super) fn update<U: NodeUpdate<T>>(&mut self, target_key: &[u8], updater: U, alloc: A) -> Result<(), &'static str> {
+    pub(super) fn update<U: NodeUpdate<T>>(&mut self, target_key: &[u8], updater: U, alloc: A) -> Result<(), TrieError> {
         use ProbeResult::*;
         let alloc_copy = alloc.clone();
-        let action = move |pos: BitPosition, find_result: ProbeResult<&mut Self, NonNoneMut<NodeLinkRef<T,N,K,H,A,M>>> | {
+        let action = move |pos: BitPosition, find_result: ProbeResult<&mut Self, NonNoneMut<NodeLinkInner<T,N,K,H,A,M>>> | {
             match find_result {
                 EmptySlot(link) => {
                     if let Some(value) = updater.on_vacant() {
@@ -145,14 +149,14 @@ impl<T: Digestible, const N: usize, const K: usize, H:Digest, A: Allocator + Clo
                         link.0 = Some((leaf.digest(), Box::new_in(leaf, alloc.clone())));
                         Ok(())
                     } else {
-                        Err("Cannot create leaf with null initializer")
+                        Err(TrieError::MissingInitializer)
                     }
                 }
                 ExactMatch(link) => {
                     let (hash, node) = link.into_mut();
                     match &mut node.kind {
                         Kind::Leaf { value, .. } => updater.on_occupied(value),
-                        _ => return Err("Unsupported trie set"),
+                        _ => return Err(TrieError::UnsupportedSet),
                     };
                     *hash = node.digest();
                     Ok(())
@@ -160,10 +164,10 @@ impl<T: Digestible, const N: usize, const K: usize, H:Digest, A: Allocator + Clo
                 Disagreement(existing, split) => {
                     let (existing_hash, existing_node) = existing.into_mut();
                     if split.prefix.is_some() {
-                        return Err("Cannot set a value on a prefix");
+                        return Err(TrieError::SetOnPrefix);
                     }
                     let Some(new_value) = updater.on_vacant() else {
-                        return Err("Cannot create leaf with null initializer")
+                        return Err(TrieError::MissingInitializer)
                     };
                     // create keys/slots for to to-be-installed branch
                     let new_branch_key = split.write_prefix::<K,A>(&existing_node.key, alloc.clone());
@@ -194,7 +198,7 @@ impl<T: Digestible, const N: usize, const K: usize, H:Digest, A: Allocator + Clo
     /// Implement [`Trie::delete`] as a thin wrapper around `Self::probe_mut`.
     pub(super) fn delete(&mut self, target_key: &[u8], alloc: A) -> Option<T> {
         use ProbeResult::*;
-        let action = |_: BitPosition, find_result: ProbeResult<&mut Self, NonNoneMut<NodeLinkRef<T,N,K,H,A,M>>> | {
+        let action = |_: BitPosition, find_result: ProbeResult<&mut Self, NonNoneMut<NodeLinkInner<T,N,K,H,A,M>>> | {
             match find_result {
                 ExactMatch(link) => {
                     match &link.as_ref().1.kind {
@@ -217,7 +221,7 @@ impl<T: Digestible, const N: usize, const K: usize, H:Digest, A: Allocator + Clo
     /// Implement [`Trie::get`] as a thin wrapper around `Self::probe`.
     pub(super) fn get<'a>(&'a self, search_key: &[u8]) -> Option<&'a T> {
         use ProbeResult::*;
-        let action = |_pos, result: ProbeResult<(), NonNone<'a, NodeLinkRef<T,N,K,H,A,M>>>| {
+        let action = |_pos, result: ProbeResult<(), NonNone<'a, NodeLinkInner<T,N,K,H,A,M>>>| {
             match result {
                 ExactMatch(ref link) => link.get().1.value_ref(),
                 _ => None,
@@ -232,12 +236,12 @@ impl<T: Digestible, const N: usize, const K: usize, H:Digest, A: Allocator + Clo
     }
 
     /// Return a reference to this [`NodeLink`]'s payload as optional `NonNone` option reference
-    fn as_opt_ref(&self) -> Option<NonNone<'_, NodeLinkRef<T,N,K,H,A,M>>> {
+    fn as_opt_ref(&self) -> Option<NonNone<'_, NodeLinkInner<T,N,K,H,A,M>>> {
         NonNone::new(&self.0)
     }
 
     /// Return a reference to this [`NodeLink`]'s payload as optional `NonNoneMut` option reference
-    fn as_opt_mut(&mut self) -> Option<NonNoneMut<'_, NodeLinkRef<T,N,K,H,A,M>>> {
+    fn as_opt_mut(&mut self) -> Option<NonNoneMut<'_, NodeLinkInner<T,N,K,H,A,M>>> {
         NonNoneMut::new(&mut self.0)
     }
 
@@ -291,7 +295,7 @@ impl<T: Digestible, const N: usize, const K: usize, H:Digest, A: Allocator + Clo
     /// 
     /// SAFTEY: must ensure caller node has [`Kind::Branch`].
     #[inline]
-    unsafe fn raw_set_child(&mut self, idx: usize, node: Self, alloc: A) -> Result<(), &'static str> {
+    unsafe fn raw_set_child(&mut self, idx: usize, node: Self, alloc: A) -> Result<(), TrieError> {
         let link = NodeLink(Some((node.digest(), Box::new_in(node, alloc))));
         match &mut self.kind {
             Kind::Branch { children, .. } => children[idx] = link,
@@ -349,8 +353,8 @@ impl<T: Digestible, const N: usize, const K: usize, A: Allocator + Clone, H: Dig
         // so the pointee behind the box may be reinterpreted; the allocator is threaded
         // through unchanged so the box can later be freed in the same allocator it came from.
         const {
-            assert!(std::mem::size_of::<Self>() == std::mem::size_of::<Node<T,N,K,H,A,Partial>>());
-            assert!(std::mem::align_of::<Self>() == std::mem::align_of::<Node<T,N,K,H,A,Partial>>());
+            assert!(std::mem::size_of::<Self>() == std::mem::size_of::<NodeLink<T,N,K,H,A,Partial>>());
+            assert!(std::mem::align_of::<Self>() == std::mem::align_of::<NodeLink<T,N,K,H,A,Partial>>());
         };
         if let NodeLink(Some((digest, complete_node))) = self {
             let (raw, alloc) = Box::into_raw_with_allocator(complete_node);
@@ -451,17 +455,18 @@ mod witness_tests {
     use allocator_api2::alloc::Global;
     use sha2::Sha256;
     use test_log::test;
-    use crate::merkle::types::{Complete, Trie};
-    use crate::merkle::internal::empty_hash;
+    use crate::types::{Complete, Trie};
+    use crate::internal::empty_hash;
+    use crate::digestible::W;
 
-    type U64BinaryTrie = Trie<u64,4,2,Sha256,Global,Complete>;
+    type U64BinaryTrie = Trie<W<u64>,4,2,Sha256,Global,Complete>;
 
     #[test]
     fn initial_node_has_initial_key() {
         let mut t: U64BinaryTrie = Trie::new();
         let initial_key = &[1,2,3];
         println!("Orig: {t:?}");
-        t.set(initial_key, 42).unwrap();
+        t.set(initial_key, W(42)).unwrap();
         println!("Set: {t:?}");
         let (_hash, node) = t.1.0.unwrap();
         assert_eq!(&*node.key, initial_key);
@@ -470,7 +475,7 @@ mod witness_tests {
     #[test]
     fn preserves_key_and_digest() {
         let mut t: U64BinaryTrie = Trie::new();
-        t.set(&[1,2,3,], 42).unwrap();
+        t.set(&[1,2,3,], W(42)).unwrap();
         let digest_before = t.digest();
         let witness = t.clone().to_partial();
         assert_eq!(witness.digest(), digest_before);
@@ -481,10 +486,10 @@ mod witness_tests {
     fn test_delete() {
         let mut t: U64BinaryTrie = Trie::new();
         println!("Empty: {t:?}");
-        t.set(&[1,2,3,], 42).unwrap();
+        t.set(&[1,2,3,], W(42)).unwrap();
         let orig = t.clone();
         println!("With 42: {t:?}");
-        t.set(&[1,2,4,], 43).unwrap();
+        t.set(&[1,2,4,], W(43)).unwrap();
         println!("With 43: {t:?}");
         t.delete(&[1,2,4]).unwrap();
         assert!(orig.hash_eq(&t), "Original and Deleted tries are unequal:\n{orig:?}\n{t:?}");
@@ -497,9 +502,9 @@ mod witness_tests {
     #[test]
     fn witness_shape() {
         let mut t: U64BinaryTrie = Trie::new();
-        t.set(&[1,2,3,], 42).unwrap();
+        t.set(&[1,2,3,], W(42)).unwrap();
         println!("Orignal: {t:?}");
-        t.set(&[1,2,4,], 43).unwrap();
+        t.set(&[1,2,4,], W(43)).unwrap();
         println!("Orignal: {t:?}");
         let mut t = t.to_partial();
         t.witness_for_keys(vec![&[1]]);

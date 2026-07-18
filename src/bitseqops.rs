@@ -1,3 +1,4 @@
+//! Operations on bitstrings.
 use std::borrow::Borrow;
 use std::fmt::Debug;
 use crate::utils::{Allocator, Box, copy_slice_into_box};
@@ -251,6 +252,7 @@ mod test {
     use test_log::test;
 
     #[test]
+    #[rustfmt::skip]
     fn test_mask_shift() {
         let masks: &[u8] = &[0b00000000, 0b00000001, 0b00000010, 0b00000100, 0b00001100, 0b00110000, 0b01000000, 0b10000000];
         let mask_leading: &[u8] = &[0b11111111, 0b11111110, 0b11111100, 0b11111000, 0b11110000, 0b11000000, 0b10000000, 0b00000000];
@@ -404,6 +406,7 @@ mod test {
 
     #[test]
     fn test_find_first_distinct_bits_prefix() {
+        #[rustfmt::skip]
         let inputs: [(&[u8], &[u8], usize); _] = [
             (&[], &[0], 0),                             // empty prefix
             (&[0,0], &[0b00000001], 0),                 // truncated-to-empty prefix

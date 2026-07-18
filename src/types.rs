@@ -1,23 +1,5 @@
-/// Defines the Merkle Trie type structure
-
-/* TODO:
- *
- * We want to revamp API to:
- * 
- * 1. make node internals private to prevent arbitrary access
- * 2. limit mut internal access to a few safe functions:
- *    - create_leaf_at_root - crates new leaf with complete key node --- always safe
- *    - opaqueify - makes node opaque --- always safe
- *    - create_leaf_at_branch - creates new leaf with complete key node --- always safe IF we fixup ptr hash
- *    - overwite value - overwrites leaf value --- always safe IF we fixup ptr hash
- *    - split_node - takes node with disagreement and splits it --- always safe IF we fixup ptr hash
- * 3. ensure only probe/probe_mut need to understand how to walk trie, like we already do
- * 4. replace closure argument in probe_mut with action selector
- * 5. optionally, make probe have a matching structure 
- * 
- */
+//! Merkle [`Trie`] data types.
 use digest::{Digest, Output};
-
 use crate::digestible::Digestible;
 use crate::utils::{Allocator, Box};
 
@@ -25,19 +7,46 @@ use crate::utils::{Allocator, Box};
 /// 
 /// We describe its generic paramters below:
 /// 
-/// | Param | Bounds                                                               | Description                                                             |
-/// | ---   | ---                                                                  | ---                                                                     |
-/// | `T`   | [`Digestible`]                                                       | The value type stored in this trie                                      |
-/// | `N`   | [`usize`]                                                            | Max key length in bytes                                                 |
-/// | `K`   | [`usize`]                                                            | Node branching factor (2,4,16,256 - powers of two for fast bitwise ops) |
-/// | `H`   | [`Digest`]                                                           | The hash function used for hash pointers                                |
-/// | `A`   | [`Allocator`] + [`Clone`]                                             | The allocator used to store keys/values/nodes                           | 
+/// | Param | Bounds                     | Description                                                             |
+/// | ---   | ---                        | ---                                                                     |
+/// | `T`   | [`Digestible`]             | The value type stored in this trie                                      |
+/// | `N`   | [`usize`]                  | Max key length in bytes                                                 |
+/// | `K`   | [`usize`]                  | Node branching factor (2,4,16,256 - powers of two for fast bitwise ops) |
+/// | `H`   | [`Digest`]                 | The hash function used for hash pointers                                |
+/// | `A`   | [`Allocator`] + [`Clone`]  | The allocator used to store keys/values/nodes                           | 
 ///
 /// For dense tries, higher branching factors can reduce size overhead.
 ///
 /// If `T` also implements [`Debug`]/[`Clone`], then [`Trie`] will implements [`Debug`]/[`Clone`].
 #[derive(Clone)]
 pub struct Trie<T: Digestible, const N: usize, const K: usize, H: Digest, A: Allocator + Clone, M: TrieMode>(pub(super) A, pub(super) NodeLink<T,N,K,H,A,M>);
+
+/// Errors that can occur while performing [`Trie`] operations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrieError {
+    /// The provided key was empty or exceeded the trie's maximum key length.
+    InvalidKeyLength,
+    /// A leaf could not be created because no initial value was supplied.
+    MissingInitializer,
+    /// The target key resolved to a node whose kind does not support this update.
+    UnsupportedSet,
+    /// The target key is a prefix of an existing key, or vice versa, so no value can be set there.
+    SetOnPrefix,
+}
+
+impl std::fmt::Display for TrieError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let msg = match self {
+            Self::InvalidKeyLength => "key length is invalid",
+            Self::MissingInitializer => "cannot create leaf with null initializer",
+            Self::UnsupportedSet => "unsupported trie set",
+            Self::SetOnPrefix => "cannot set a value on a prefix",
+        };
+        write!(f, "{msg}")
+    }
+}
+
+impl std::error::Error for TrieError {}
 
 /// A node in a Merkleized, compressed trie.
 /// 
@@ -84,24 +93,24 @@ pub(super) enum Kind<T: Digestible, const N: usize, const K: usize, H: Digest, A
 }
 
 /// The hash reference contained inside a [`NodeLink`]
-pub(super) type NodeLinkRef<T,const N: usize, const K: usize, H, A, M> = (Output<H>, Box<Node<T,N,K,H,A,M>, A>);
+pub(super) type NodeLinkInner<T,const N: usize, const K: usize, H, A, M> = (Output<H>, Box<Node<T,N,K,H,A,M>, A>);
 
 /// A nullable link between [`Node`]s in a [`Trie`]
 #[derive(Clone)]
 pub(super) struct NodeLink<T: Digestible, const N: usize, const K: usize, H: Digest, A: Allocator + Clone, M: TrieMode>(
-    pub Option<NodeLinkRef<T,N,K,H,A,M>>,
+    pub Option<NodeLinkInner<T,N,K,H,A,M>>,
 );
 
-// implement opaque trie node partial type
+// Opaque [`Irie`] Node Tag Type.
 mod sealed { pub trait SealedTrieMode {} }
 pub use mode::{Complete, Partial};
 pub mod mode {
     #[allow(unused_imports)] // for doc-comments
     use super::{Trie, Kind};
-    /// Marker type that forces a [`Trie`] to be complete (i.e., it _cannot_ contain [`Kind::Opaque`] nodes).
+    /// Marker type that forces a [`Trie`] to be complete (i.e., it _cannot_ contain opaque nodes).
     #[derive(Clone)]
     pub struct Complete;
-    /// Marker type that permits a [`Trie`] to be partial (i.e., it _may_ contain [`Kind::Opaque`] nodes).
+    /// Marker type that permits a [`Trie`] to be partial (i.e., it _may_ contain opaque nodes).
     #[derive(Clone)]
     pub struct Partial;
     impl super::sealed::SealedTrieMode for Complete {}
@@ -124,7 +133,7 @@ pub trait TrieMode: sealed::SealedTrieMode {
 }
 
 
-/// Trait that describes how to update the value stored in a [Node].
+/// Trait that describes how to update the value stored in a [`Trie`] node.
 /// 
 /// A [`std::collections::hash_map::Entry`]-style API does not work well
 /// for Merkleized data structures (like our [`Trie`]) because returning
@@ -181,6 +190,7 @@ impl<T> NodeUpdate<T> for NodeUpsert<T> {
     }
 }
 
+/// Basic trait implementations for primary types.
 mod basic_trait_impls {
     use super::*;
     use std::fmt::Debug;
@@ -232,7 +242,7 @@ mod basic_trait_impls {
 
     impl<T: Digestible + Debug, const N: usize, const K: usize, H:Digest, A: Allocator + Clone, M: TrieMode> NodeLink<T,N,K,H,A,M> {
         /// This function drives the [`Debug`] implementation for [`Trie`].
-        pub(crate) fn debug_fmt(&self, depth: usize, child_num: Option<usize>, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        pub(super) fn debug_fmt(&self, depth: usize, child_num: Option<usize>, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
             let space = " ".repeat(depth*2);
             write!(f, "{}", space)?;
             if let Some(child_num) = child_num {

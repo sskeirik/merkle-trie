@@ -1,8 +1,9 @@
+//! Merkle [`Trie`] public API.
 use allocator_api2::alloc::Global;
 use digest::{Digest, Output};
 use crate::digestible::Digestible;
-use crate::merkle::types::{Trie, TrieMode, Node, NodeLink, NodeUpdate, NodeUpsert};
-use crate::merkle::types::mode::*;
+use crate::types::{Trie, TrieMode, Node, NodeLink, NodeUpdate, NodeUpsert, TrieError};
+use crate::types::mode::*;
 use crate::utils::{Allocator, Box, copy_slice_into_box};
 
 impl<T: Digestible, const N: usize, const K: usize, H: Digest> Trie<T,N,K,H,Global,Complete> {
@@ -22,13 +23,13 @@ impl<T: Digestible, const N: usize, const K: usize, A: Allocator + Clone, H: Dig
 impl<T: Digestible, const N: usize, const K: usize, H:Digest, A: Allocator + Clone, M: TrieMode> Trie<T,N,K,H,A,M> {
     /// Set the value of target_key in the trie
     #[must_use]
-    pub fn update<U: NodeUpdate<T>>(&mut self, target_key: &[u8], updater: U) -> Result<(), &'static str> {
+    pub fn update<U: NodeUpdate<T>>(&mut self, target_key: &[u8], updater: U) -> Result<(), TrieError> {
         Self::check_key(target_key)?;
         let alloc = &self.0;
         // unlike other top-level functions, we need to ensure that case EmptySlot
         // is not reachable for the root node when calling probe_mut internally
         if self.1.0.is_none() {
-            let value = updater.on_vacant().ok_or("Cannot set leaf with null initializer")?;
+            let value = updater.on_vacant().ok_or(TrieError::MissingInitializer)?;
             let leaf = Node::new_leaf(copy_slice_into_box(target_key, alloc.clone()), value);
             self.1.0 = Some((leaf.digest(), Box::new_in(leaf, alloc.clone())));
             Ok(())
@@ -39,19 +40,19 @@ impl<T: Digestible, const N: usize, const K: usize, H:Digest, A: Allocator + Clo
 
     /// Set the value of target_key in the trie
     #[must_use]
-    pub fn set(&mut self, target_key: &[u8], value: T) -> Result<(), &'static str> {
+    pub fn set(&mut self, target_key: &[u8], value: T) -> Result<(), TrieError> {
         Self::check_key(target_key)?;
         self.update(target_key, NodeUpsert { value })
     }
 
     /// Delete a non-opaque node from the tree and return its value
-    pub fn delete(&mut self, target_key: &[u8]) -> Result<Option<T>, &'static str> {
+    pub fn delete(&mut self, target_key: &[u8]) -> Result<Option<T>, TrieError> {
         Self::check_key(target_key)?;
         Ok(self.1.delete(target_key, self.0.clone()))
     }
 
     /// Return a reference to the value of search_key in the trie, if it exists
-    pub fn get<'a>(&'a self, target_key: &[u8]) -> Result<Option<&'a T>, &'static str> {
+    pub fn get<'a>(&'a self, target_key: &[u8]) -> Result<Option<&'a T>, TrieError> {
         Self::check_key(target_key)?;
         Ok(self.1.get(target_key))
     }
@@ -79,9 +80,9 @@ impl<T: Digestible, const N: usize, const K: usize, H:Digest, A: Allocator + Clo
     /// Ensure that argument keys satisfy this [`Trie`]'s length restrictions
     #[inline]
     #[must_use]
-    fn check_key(key: &[u8]) -> Result<(), &'static str> {
+    fn check_key(key: &[u8]) -> Result<(), TrieError> {
         if key.len() == 0 || key.len() > N {
-            Err("key length is invalid")
+            Err(TrieError::InvalidKeyLength)
         } else {
             Ok(())
         }
