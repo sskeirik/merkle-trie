@@ -17,7 +17,7 @@ impl<'a,T> NonNone<'a,T> {
         if opt.is_none() {
             return None
         }
-        return Some(Self(opt))
+        Some(Self(opt))
     }
 
     /// Return a shared reference to the inner value
@@ -40,18 +40,18 @@ impl<'a,T> NonNoneMut<'a,T> {
         if opt.is_none() {
             return None
         }
-        return Some(Self(opt))
+        Some(Self(opt))
     }
 
     /// Return a shared reference to the inner value as a reborrow
-    pub fn as_ref(&self) -> &T {
+    pub fn reborrow_ref(&self) -> &T {
         // SAFETY: by construction
         let opt_ref = self.0.as_ref();
         unsafe { opt_ref.unwrap_unchecked() }
     }
 
     /// Return a mutable reference to the inner value as a reborrow
-    pub fn as_mut(&mut self) -> &mut T {
+    pub fn reborrow_mut(&mut self) -> &mut T {
         // SAFETY: by construction
         let opt_ref = self.0.as_mut();
         unsafe { opt_ref.unwrap_unchecked() }
@@ -72,9 +72,12 @@ impl<'a,T> NonNoneMut<'a,T> {
 
 /// Given a mutable input slice and a list of `indices`, return a vector of mutable references for each indexed element
 ///
-/// SAFETY: Caller must ensure that each index in the `indices` array is in-bounds for the input slice and that it contains no duplicates.
+/// # SAFETY
+/// 
+/// Caller must ensure that each index in the `indices` array is in-bounds for the input slice and that it contains no duplicates.
 pub unsafe fn pick_mut_unchecked<'a, T>(arr: &'a mut [T], indices: &[usize]) -> Vec<&'a mut T> {
     let ptr = arr.as_mut_ptr();
+    // SAFETY: by assumption
     indices.iter().map(|&i| unsafe { &mut *ptr.add(i) }).collect()
 }
 

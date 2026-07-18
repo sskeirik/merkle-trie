@@ -1,17 +1,95 @@
-//! Internal Merkle [`Trie`] operations.
+//! Internal Merkle [`Trie`] node representation and algorithms.
+use std::fmt::Debug;
 use std::collections::HashMap;
 use digest::{Digest, Output};
 use crate::digestible::{Digestible, HashFrag, empty_hash};
-use crate::types::{TrieMode, Node, NodeLink, NodeLinkInner, NodeUpdate, Kind, TrieError};
-use crate::types::mode::*;
+use crate::trie::{TrieError, NodeUpdate};
 use crate::utils::{Allocator, Box, NonNone, NonNoneMut, pick_mut_unchecked};
 use crate::bitseqops::{BitDiff, BitPosition, BitSeqOps, find_first_distinct_bits};
 #[allow(unused_imports)] // debugging or doc-comments
 use {
     tracing::{instrument, debug},
-    super::utils::{to_ascii, to_bin, to_hex},
-    super::Trie,
+    crate::utils::{to_ascii, to_bin, to_hex},
+    crate::trie::Trie,
 };
+
+/// A node in a Merkleized, compressed trie.
+///
+/// The `repr(C)` attribute ensures a consistent representation across the distinct [`TrieMode`]s
+ #[derive(Clone)]
+ #[repr(C)]
+pub(super) struct Node<T: Digestible, const N: usize, const K: usize, H: Digest, A: Allocator + Clone, M: TrieMode> {
+    /// the whole bytes that must be matched to visit this node
+    pub key: Box<[u8],A>,
+    /// the node's kind-specific data
+    pub kind: Kind<T,N,K,H,A,M>,
+}
+
+/// A generic Merkle trie node payload
+///
+/// The `repr(C,u8)` attribute ensures a consistent representation across the distinct [`TrieMode`]s
+#[derive(Clone)]
+#[repr(C, u8)]
+pub(super) enum Kind<T: Digestible, const N: usize, const K: usize, H: Digest, A: Allocator + Clone, M: TrieMode> {
+    /// A trie branch
+    Branch {
+        /// Encodes the log2(`K`) bits in the [`Node::key`]`.len()`th byte that distinguishes the keys of child nodes
+        mask: u8,
+        /// Stores the `K` child nodes of this branch
+        children: [NodeLink<T,N,K,H,A,M>; K],
+    },
+    /// A trie leaf
+    Leaf {
+        /// the data stored at this leaf
+        value: T,
+        /// zero-sized type that exists to record the hash algorithm used by this trie
+        _phantom: std::marker::PhantomData<H>,
+    },
+    /// Witness for a subtrie of unknown shape (only constructible if [`TrieMode`] is set to [`Partial`]).
+    Opaque(Output<H>, M::Marker),
+}
+
+/// The hash reference contained inside a [`NodeLink`]
+pub(super) type NodeLinkInner<T,const N: usize, const K: usize, H, A, M> = (Output<H>, Box<Node<T,N,K,H,A,M>, A>);
+
+/// A nullable link between [`Node`]s in a [`Trie`]
+#[derive(Clone)]
+pub(super) struct NodeLink<T: Digestible, const N: usize, const K: usize, H: Digest, A: Allocator + Clone, M: TrieMode>(
+    pub Option<NodeLinkInner<T,N,K,H,A,M>>,
+);
+
+// Opaque [`Trie`] Node Tag Type.
+mod sealed { pub trait SealedTrieMode {} }
+pub use mode::{Complete, Partial};
+pub mod mode {
+    #[allow(unused_imports)] // for doc-comments
+    use super::Kind;
+    #[allow(unused_imports)] // for doc-comments
+    use crate::trie::Trie;
+    /// Marker type that forces a [`Trie`] to be complete (i.e., it _cannot_ contain opaque nodes).
+    #[derive(Clone)]
+    pub struct Complete;
+    /// Marker type that permits a [`Trie`] to be partial (i.e., it _may_ contain opaque nodes).
+    #[derive(Clone)]
+    pub struct Partial;
+    impl super::sealed::SealedTrieMode for Complete {}
+    impl super::sealed::SealedTrieMode for Partial {}
+    impl super::TrieMode for Complete {
+        type Marker = std::convert::Infallible;
+    }
+    impl super::TrieMode for Partial {
+        type Marker = ();
+    }
+}
+
+/// Trait that describes whether a [`Trie`] may be partial
+/// (i.e., may contain [`Kind::Opaque`] nodes).
+pub trait TrieMode: sealed::SealedTrieMode {
+    /// ZST tag stored in [`Kind::Opaque`] nodes.
+    /// In [`Complete`] tries, resolves to the empty type
+    /// (preventing construction of opaque nodes).
+    type Marker: Clone;
+}
 
 /// A probe result to be handled by a probe action
 enum ProbeResult<L,N> {
@@ -28,7 +106,6 @@ enum ProbeResult<L,N> {
 }
 
 impl<T: Digestible, const N: usize, const K: usize, H:Digest, A: Allocator + Clone, M: TrieMode> NodeLink<T,N,K,H,A,M> {
-
     /// Probe the trie, optionally with a bound, applying a user-specified action when the probe terminates
     #[instrument(level="debug", skip(self, bound, key, action))]
     fn probe<'a, R>(&'a self, mut bound: Option<usize>, key: &[u8], pos: BitPosition, action: impl FnOnce(BitPosition, ProbeResult<(), NonNone<'a,NodeLinkInner<T,N,K,H,A,M>>>) -> R) -> R {
@@ -75,7 +152,7 @@ impl<T: Digestible, const N: usize, const K: usize, H:Digest, A: Allocator + Clo
             debug!("For {}, empty slot found at branch {}", to_ascii(key), label);
             return action(pos, ProbeResult::EmptySlot(self))
         };
-        let (hash, node) = opt_mut.as_mut();
+        let (hash, node) = opt_mut.reborrow_mut();
 
         let Some(split) = find_first_distinct_bits(&key[pos.index..], &node.key, pos.bits, None, Some(node.get_key_bits())) else {
             debug!("For {}, exact match found at node {}", to_ascii(key), label);
@@ -201,18 +278,18 @@ impl<T: Digestible, const N: usize, const K: usize, H:Digest, A: Allocator + Clo
         let action = |_: BitPosition, find_result: ProbeResult<&mut Self, NonNoneMut<NodeLinkInner<T,N,K,H,A,M>>> | {
             match find_result {
                 ExactMatch(link) => {
-                    match &link.as_ref().1.kind {
+                    match &link.reborrow_ref().1.kind {
                         Kind::Leaf { .. } => {}
                         _ => return None,
                     };
                     let (_, leaf) = std::mem::take(link.into_inner()).expect("NonNone");
                     let leaf = Box::into_inner(leaf);
                     match leaf.kind {
-                        Kind::Leaf { value, .. } => return Some(value),
+                        Kind::Leaf { value, .. } => Some(value),
                         _ => panic!("Kind::Leaf"),
                     }
                 }
-                _ => return None
+                _ => None
             }
         };
         self.probe_mut(alloc, None, target_key, BitPosition { index: 0, bits: 0 }, action)
@@ -292,7 +369,7 @@ impl<T: Digestible, const N: usize, const K: usize, H:Digest, A: Allocator + Clo
     }
 
     /// Upsert a child node into the current node at the given slot.
-    /// 
+    ///
     /// SAFTEY: must ensure caller node has [`Kind::Branch`].
     #[inline]
     unsafe fn raw_set_child(&mut self, idx: usize, node: Self, alloc: A) -> Result<(), TrieError> {
@@ -304,9 +381,9 @@ impl<T: Digestible, const N: usize, const K: usize, H:Digest, A: Allocator + Clo
         };
         Ok(())
     }
-    
+
     /// Return the number of bits which participate in key comparisons against this node.
-    /// 
+    ///
     /// For [`Kind::Branch`] or [`Kind::Opaque`] nodes, this is just all bits in the key.
     /// For [`Kind::Branch`] nodes, perform the same calculation but subtract all bits in the final byte that overlap/succeed the mask.
     #[inline]
@@ -334,7 +411,7 @@ impl<T: Digestible, const N: usize, const K: usize, H:Digest, A: Allocator + Clo
 
 impl<T: Digestible, const N: usize, const K: usize, A: Allocator + Clone, H: Digest> NodeLink<T,N,K,H,A,Complete> {
     /// Reinterpret a [`NodeLink`] in-place
-    pub(super) fn to_partial(self) -> NodeLink<T,N,K,H,A,Partial> {
+    pub(super) fn into_partial(self) -> NodeLink<T,N,K,H,A,Partial> {
         // SAFETY: Kind is #[repr(C, u8)] and Node/BranchData are #[repr(C)], and the
         // only field whose type varies with the mode (`Kind::Opaque`'s second field,
         // `M::Marker`) is a zero-sized tag, so it never affects the enum's size --
@@ -378,7 +455,7 @@ impl<T: Digestible, const N: usize, const K: usize, A: Allocator + Clone, H: Dig
         let mut indices = Vec::with_capacity(K);
 
         // in this loop, we repeatedly prune nodes that are NOT in our frontier
-        while frontier.len() != 0 {
+        while !frontier.is_empty() {
             frontier = frontier.into_iter().flat_map(|(link, keys)| {
                 // if the node doesn't exist or else is terminal, the current keys
                 // cannot be used to expand the frontier further, so stop exploration
@@ -437,9 +514,9 @@ impl<T: Digestible, const N: usize, const K: usize, A: Allocator + Clone, H: Dig
                 let local_frontier: Vec<_> = unsafe { pick_mut_unchecked(children, &indices) };
 
                 // finally, we expand the frontier vector for each child node
-                indices.iter().zip(local_frontier.into_iter()).map(|(child_idx, node)| {
+                indices.iter().zip(local_frontier).map(|(child_idx, node)| {
                     // let node = &mut *node.as_mut().expect("Child node must exist for index").1;
-                    let mut keys = per_node_keys.remove(&child_idx).expect("Cannot fail to locate existing index");
+                    let mut keys = per_node_keys.remove(child_idx).expect("Cannot fail to locate existing index");
                     keys.sort();
                     keys.dedup();
                     (node, keys)
@@ -450,14 +527,76 @@ impl<T: Digestible, const N: usize, const K: usize, A: Allocator + Clone, H: Dig
 
 }
 
+ /// Node equality is just equality of its node structure.
+ impl<T: Digestible + PartialEq + Eq, const N: usize, const K: usize, H:Digest, A: Allocator + Clone, M: TrieMode> PartialEq for NodeLink<T,N,K,H,A,M> {
+     fn eq(&self, other: &Self) -> bool {
+         use Kind::*;
+         match (&self.0, &other.0) {
+             (Some((_, node1)), Some((_, node2))) => {
+                 node1.key == node2.key && match (&node1.kind, &node2.kind) {
+                     (Leaf { value: v1, ..  }, Leaf { value: v2, .. }) => v1 == v2,
+                     (Opaque(digest1, _), Opaque(digest2, _)) => digest1 == digest2,
+                     (Branch { mask: m1, children: c1 }, Branch { mask: m2, children: c2 }) => {
+                         m1 == m2 && c1.iter().zip(c2.iter()).all(|(c1, c2)| c1 == c2 )
+                     }
+                     (_, _) => false,
+                 }
+             }
+             (None, None) => true,
+             _ => false,
+         }
+     }
+ }
+
+ /// The debug format of a node is a nested presentation of the trie structure
+ impl<T: Digestible + Debug, const N: usize, const K: usize, H:Digest, A: Allocator + Clone, M: TrieMode> Debug for NodeLink<T,N,K,H,A,M> {
+     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+         self.debug_fmt( 0, None, f)
+     }
+ }
+
+impl<T: Digestible + Debug, const N: usize, const K: usize, H:Digest, A: Allocator + Clone, M: TrieMode> NodeLink<T,N,K,H,A,M> {
+    /// This function drives the [`Debug`] implementation for [`Trie`].
+    pub(super) fn debug_fmt(&self, depth: usize, child_num: Option<usize>, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let space = " ".repeat(depth*2);
+        write!(f, "{}", space)?;
+        if let Some(child_num) = child_num {
+            write!(f, "{:>3}: ", child_num)?;
+        }
+        if let Some((hash, node)) = self.0.as_ref() {
+            write!(f, "{} -> ", HashFrag::<H>(hash))?;
+            match &node.kind {
+                Kind::Leaf { value, .. } => {
+                    write!(f, "L({}, {:?})", to_bin::<false>(&node.key), value)
+                }
+                Kind::Branch { mask, children, .. } => {
+                    write!(f, "B({}, {}, ", to_bin::<false>(&node.key), to_bin::<false>(&[*mask]))?;
+                    for (idx, child) in children.iter().enumerate() {
+                        writeln!(f)?;
+                        Self::debug_fmt(child, depth+1, Some(idx), f)?;
+                    }
+                    write!(f, "\n{})", space)
+                }
+                Kind::Opaque(..) => write!(f, "O({})", HashFrag::<H>(hash))
+            }
+        } else {
+            if depth == 0 {
+                write!(f, "Trie(Empty)")
+            } else {
+                write!(f, "E")
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod witness_tests {
     use allocator_api2::alloc::Global;
     use sha2::Sha256;
     use test_log::test;
-    use crate::types::{Complete, Trie};
-    use crate::internal::empty_hash;
-    use crate::digestible::W;
+    use crate::trie::Trie;
+    use crate::node::Complete;
+    use crate::digestible::{empty_hash, W};
 
     type U64BinaryTrie = Trie<W<u64>,4,2,Sha256,Global,Complete>;
 

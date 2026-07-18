@@ -142,7 +142,7 @@ pub fn find_first_distinct_bits(a: &[u8], b: &[u8], offset: usize, a_bits: Optio
     }
 
     // Otherwise, they are identical
-    return None;
+    None
 }
 
 impl BitDiff {
@@ -233,7 +233,7 @@ impl<const K: usize> BitSeqOps<K> {
     pub fn recover<A: Allocator + Clone>(prefix: impl Borrow<[u8]>, mask: u8, mask_value: u8, suffix: impl Borrow<[u8]>, alloc: A) -> Box<[u8],A> {
         let prefix = prefix.borrow();
         let suffix = suffix.borrow();
-        debug_assert!(prefix.len() > 0 && suffix.len() > 0);
+        debug_assert!(!(prefix.is_empty() || suffix.is_empty()));
         let merged_key = Box::<[u8],A>::new_uninit_slice_in(prefix.len() + suffix.len() - 1, alloc);
         let mut merged_key = unsafe { merged_key.assume_init() };
         merged_key[0..prefix.len()].copy_from_slice(prefix);

@@ -3,14 +3,13 @@
 
 pub mod utils;
 pub mod bitseqops;
-pub(self) mod digestible;
-pub(self) mod api;
-pub(self) mod types;
-mod internal;
+mod digestible;
+mod trie;
+mod node;
 
 // Public re-exports
-pub use types::{Trie, Complete, Partial, TrieError};
-pub use types::NodeUpdate;
+pub use trie::{Trie, TrieError, NodeUpdate};
+pub use node::{Complete, Partial};
 pub use digestible::Digestible;
 
 #[allow(unused_imports)] // for doc-comments

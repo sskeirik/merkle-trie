@@ -49,8 +49,7 @@ For implementation simplicity:
 
 ## Cargo Features
 
-- `std_allocator_api` - defines `Allocator` as `std::alloc::Allocator` (currently requires nightly Rust);
-   if unset, the `allocator-api2` shim package is used instead.
+- `std_allocator_api` - defines `Allocator` as `std::alloc::Allocator` (currently requires nightly Rust); if unset, the `allocator-api2` shim package is used instead.
 
 ## Details
 
