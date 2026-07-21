@@ -36,7 +36,7 @@ Expanding upon the summary sentence in more detail, we have:
    | `K`   | [`usize`]                 | Node branching factor (must choose 2,4,16, or 256 - powers of two ensure fast bitwise ops) |
    | `H`   | [`Digest`]                | The hash function used for hash pointers                                                   |
    | `A`   | [`Allocator`] + [`Clone`] | The allocator used to store keys/values/nodes                                              |
-   | `M`   | [`TrieMode`]               | Either [`Complete`] or [`Partial`] which enables `Opaque` nodes                           |
+   | `M`   | [`TrieMode`]              | Either [`Complete`] or [`Partial`] which enables `Opaque` nodes                            |
 
    For dense tries, higher branching factors can reduce size overhead.
 
@@ -59,7 +59,7 @@ use allocator_api2::alloc::Global;
 use sha2::Sha256;
 use merkle_trie::{Trie,Complete,Digest,Digestible};
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct MyCustomData(u64);
 impl Digestible for MyCustomData {
     fn update_hasher<D: Digest>(&self, hasher: &mut D) {
@@ -70,9 +70,9 @@ impl Digestible for MyCustomData {
 type MyTrie = Trie<MyCustomData,4,2,Sha256,Global,Complete>;
 
 let mut t: MyTrie = Trie::new();
-t.set(&[1,2,3], MyCustomData(45));
-t.set(&[1,2,4], MyCustomData(78));
-t.set(&[1,2,5], MyCustomData(127));
+t.set(&[1,2,3    ], MyCustomData(45));
+t.set(&[1,2,4    ], MyCustomData(78));
+t.set(&[1,2,5    ], MyCustomData(127));
 let delete_result = t.delete(&[1,2,4]);
 match delete_result {
    Ok(v) => println!("Old value at key was {v:?}"),
@@ -84,7 +84,18 @@ match get_result {
    Err(e) => println!("Error {e} occurred"),
 }
 
-let mut witness = t.to_partial();
+// if Trie data supports Clone/Debug, so does Trie
+let trie_clone = t.clone();
+println!("Trie clone: {trie_clone:?}");
+
+// build witnesses
+let mut witness1 = t.clone().to_partial();
+witness1.witness_for_keys(vec![&[1,2]]);
+println!("Witness 1: {witness1:?}");
+
+let mut witness2 = t.clone().to_partial();
+witness2.witness_for_keys(vec![&[1,2,3]]);
+println!("Witness 2: {witness2:?}");
 ``` 
 
 ## Details

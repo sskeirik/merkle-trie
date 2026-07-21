@@ -133,7 +133,9 @@ impl<T: Digestible, const N: usize, const K: usize, H:Digest, A: Allocator + Clo
                     Some(ref mut n) => *n -= 1,
                     _ => {}
                 };
-                children[slot].probe(bound, key, split.pos, action)
+                let next_pos = split.pos.increment::<K>();
+                debug!("Recursing into {slot} with pos {:?}", next_pos);
+                children[slot].probe(bound, key, next_pos, action)
             },
             // no subtrie to explore, return
             _ => {
@@ -171,9 +173,11 @@ impl<T: Digestible, const N: usize, const K: usize, H:Digest, A: Allocator + Clo
                     _ => {}
                 };
                 let child = &mut children[slot];
+                let next_pos = split.pos.increment::<K>();
+                debug!("Recursing into {slot} with pos {:?}", next_pos);
                 // perform post-deletion cleanup, if necessary
                 let pre_full = child.0.is_some();
-                let result = child.probe_mut(alloc.clone(), bound, key, split.pos, action);
+                let result = child.probe_mut(alloc.clone(), bound, key, next_pos, action);
                 let post_empty = child.0.is_none();
                 // TODO: Consider implementation options that add a branch size counter and only
                 //       perform this linear scan when the branch size counter hits zero.
@@ -594,8 +598,7 @@ mod witness_tests {
     use allocator_api2::alloc::Global;
     use sha2::Sha256;
     use test_log::test;
-    use crate::trie::Trie;
-    use crate::node::Complete;
+    use crate::{Trie, Complete, Digest, Digestible};
     use crate::digestible::{empty_hash, W};
 
     type U64BinaryTrie = Trie<W<u64>,4,2,Sha256,Global,Complete>;
@@ -648,5 +651,48 @@ mod witness_tests {
         let mut t = t.to_partial();
         t.witness_for_keys(vec![&[1]]);
         println!("Witness: {t:?}");
+    }
+
+    #[derive(Clone, Debug)]
+    struct MyCustomData(u64);
+    impl Digestible for MyCustomData {
+        fn update_hasher<D: Digest>(&self, hasher: &mut D) {
+            hasher.update(&self.0.to_le_bytes())
+        }
+    }
+
+    type MyTrie = Trie<MyCustomData,4,2,Sha256,Global,Complete>;
+
+    #[test]
+    fn misc_test() {
+        let mut t: MyTrie = Trie::new();
+        t.set(&[1,2,3], MyCustomData(45)).expect("trie set error");
+        t.set(&[1,2,5], MyCustomData(127)).expect("trie set error");
+        println!("Original trie: {t:?}");
+        t.set(&[1,2,4], MyCustomData(78)).expect("trie set error");
+        let delete_result = t.delete(&[1,2,4]);
+        match delete_result {
+           Ok(v) => println!("Old value at key was {v:?}"),
+           Err(e) => println!("Error {e} occurred"),
+        };
+        println!("\n\n\nAfter delete trie: {t:?}\n\n\n");
+        let get_result = t.get(&[1,2,3]);
+        match get_result {
+           Ok(v) => println!("Borrow a value: {v:?}"),
+           Err(e) => println!("Error {e} occurred"),
+        }
+
+        // // if Trie data supports Clone/Debug, so does Trie
+        // let trie_clone = t.clone();
+        // println!("Trie clone: {trie_clone:?}");
+
+        // // build witnesses
+        // let mut witness1 = t.clone().to_partial();
+        // witness1.witness_for_keys(vec![&[1,2]]);
+        // println!("Witness 1: {witness1:?}");
+
+        // let mut witness2 = t.clone().to_partial();
+        // witness2.witness_for_keys(vec![&[1,2,3]]);
+        // println!("Witness 2: {witness2:?}");
     }
 }

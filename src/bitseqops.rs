@@ -57,6 +57,12 @@ impl Debug for BitPosition {
     }
 }
 
+impl BitPosition {
+    pub fn increment<const K: usize>(&self) -> Self {
+        BitSeqOps::<K>::increment(self)
+    }
+}
+
 /// The location of the first bit that distinguishes two bit strings
 #[derive(Debug)]
 pub struct BitDiff {
@@ -90,7 +96,12 @@ pub fn find_first_distinct_bits(a: &[u8], b: &[u8], offset: usize, a_bits: Optio
         if v != 0 {
             return Some(BitDiff { pos: BitPosition { index: i, bits: v.trailing_zeros() as usize % 8 }, prefix: None });
         }
-        i += 1;
+        // if we need to read more bits, advance; otherwise, they are equal
+        if offset + wanted_bits > 8 {
+            i += 1;
+        } else {
+            return None
+        }
     }
 
     // get byte-aligned wanted bits and bytes
@@ -182,6 +193,13 @@ impl<const K: usize> BitSeqOps<K> {
     const K_BITS: usize = K.ilog2() as usize;
     /// The mask (before shifting) used to extract the bit string which defines the split
     const CHUNK_MASK: u8 = (K - 1) as u8;
+
+    /// Given a [`BitPosition`], return a new one
+    #[inline]
+    pub fn increment(pos: &BitPosition) -> BitPosition {
+        let newpos = pos.index * 8 + pos.bits + Self::K_BITS;
+        BitPosition { index: newpos / 8, bits: newpos % 8 }
+    }
 
     /// Given a bit offset in a byte, find the unique bitmask of length log2(K),
     /// aligned on a log2(K) bit offset, that contains the bit offset
