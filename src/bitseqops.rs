@@ -74,6 +74,7 @@ pub struct BitDiff {
 
 /// Return the index of the first bit, after the offset bits, that distinguishes the two input strings.
 /// If one bit string is a prefix of the other, the extra bits are considered to be distinct.
+#[tracing::instrument(level = "debug", skip(a,b))]
 pub fn find_first_distinct_bits(a: &[u8], b: &[u8], offset: usize, a_bits: Option<usize>, b_bits: Option<usize>) -> Option<BitDiff> {
 
     // set default length
