@@ -25,12 +25,19 @@ Expanding upon the summary sentence in more detail, we have:
    1. set its key to be the concatenation of both keys;
    2. set its body to be the body of the child node.
 
+   Note that this is a form of _lossless compression_ (and is _distinct_ from what we will discuss immediately below).
+
 3. _Merkleized_ - Each node has a cryptographic digest derived from its stored value and/or its children's digests.
 
-   This means that trie equality can be computed just by comparing trie root hashes (see [`Trie::hash_eq`]).
-   Applying this property recursively means that we can represent sub-tries by their root hash,
-   enabling an more powerful form of compression when the contents of a particular sub-trie are
-   irrelevant for a given operation (see [`Trie::witness_for_keys`]).
+   Applying this property recursively means that we can represent entrie sub-tries by their root hash,
+   enabling an more powerful form of _lossy_ compression where, when the contents of a particular sub-trie are
+   irrelevant for a given operation, we can replace it by a stub containing just its root hash (see [`Trie::witness_for_keys`]).
+
+   Taking this to the limit, if we only care about trie identity (i.e., key-value pairs are irrelevant), we can
+   collapse the entire trie into just its root's digest and use that to peform equality checks (see [`Trie::hash_eq`]).
+
+   In particular, the `TrieMode` parameter ensures that this kind of lossy compression can only occur when
+   explicitly enabled (it is _disabled_ by default).
 
 4. _Generic_ - The implementation exposes the following user-settable generic parameters:
 
@@ -41,7 +48,7 @@ Expanding upon the summary sentence in more detail, we have:
    | `K`   | [`usize`]                 | Node branching factor (must choose 2,4,16, or 256 - powers of two ensure fast bitwise ops) |
    | `H`   | [`Digest`]                | The hash function used for hash pointers                                                   |
    | `A`   | [`Allocator`] + [`Clone`] | The allocator used to store keys/values/nodes                                              |
-   | `M`   | [`TrieMode`]              | Either [`Complete`] or [`Partial`] which enables `Opaque` nodes                            |
+   | `M`   | [`TrieMode`]              | Either [`Complete`] or [`Partial`] which enables `Opaque` nodes and compression            |
 
    For dense tries, higher branching factors can reduce size overhead.
 
