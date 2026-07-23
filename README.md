@@ -1,3 +1,8 @@
+> ⚠️ **Beta Software**  
+> This project has a largely stable design and feature set, but needs more testing and refinement.  
+> The API is not expected to change significantly unless bugs are encountered.  
+> Not recommended for production use.
+
 ## Introduction
 
 A generic, Merkleized, compressed Trie library.
@@ -96,25 +101,23 @@ println!("Witness 1: {witness1:?}");
 let mut witness2 = t.clone().to_partial();
 witness2.witness_for_keys(vec![&[1,2,3]]);
 println!("Witness 2: {witness2:?}");
-``` 
+```
 
 ## Details
 
 Internally, we implement core trie operations `get`, `update`, and `delete` as thin wrappers around a pair of shared traversal
 routines, `probe` (read-only) and `probe_mut` (mutating).
 
-Each of these routines walks the trie from the root, following the branch matching each key's bits,
-until it reaches either an exact match, an empty
-child slot, a bounded search limit, or a point of disagreement between the search key and a stored node key
+Each traversal routine walks the trie from the root, following the branch matching each key's bits, until it reaches either:
+an exact match, an empty child slot, a bounded search limit, or a disagreeing bit between the target key and a stored node key
 (search for `ProbeResult` to see the details).
 
-Rather than duplicating this walk for every operation, the walk itself is written once, and each
-operation instead supplies a closure - an "action" - that is invoked exactly once, at the point where the probe
-terminates, with the `ProbeResult` it produced.
+The core trie operations then just invoke the probe routine with an "action" closure, invoked at the point where the probe terminates,
+that consumes the `ProbeResult` in order to perform its requested operation.
 
 This means the operation-specific logic (installing a new leaf/branch on `update`, removing a leaf on `delete`, returning a
 value reference on `get`) lives entirely inside the closure passed to `probe`/`probe_mut`, while the shared traversal
-code stays agnostic to what the caller intends to do with the result. 
+code stays agnostic to what the caller intends to do with the result.
 
 Finally, on the way back up the call-stack,`probe_mut` also re-hashes modified nodes and,
 where a branch has been reduced to a single child, compresses the branch-child pair,
