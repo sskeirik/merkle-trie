@@ -6,7 +6,7 @@
 //! crate is compiled.
 
 #[cfg(not(feature = "std_allocator_api"))]
-pub use allocator_api2::{boxed::Box, alloc::Allocator};
+pub use allocator_api2::{boxed::Box, alloc::{Allocator, Global}};
 #[cfg(feature = "std_allocator_api")]
 pub use std::{boxed::Box, alloc::Allocator};
 use std::fmt::Write;

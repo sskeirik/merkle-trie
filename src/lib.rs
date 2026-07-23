@@ -12,8 +12,3 @@ pub use trie::{Trie, TrieError, NodeUpdate};
 pub use node::{TrieMode, Complete, Partial};
 pub use digestible::Digestible;
 pub use digest::Digest;
-
-#[allow(unused_imports)] // for doc-comments
-use {
-    utils::Allocator,
-};

@@ -30,14 +30,17 @@ Expanding upon the summary sentence in more detail, we have:
 3. _Merkleized_ - Each node has a cryptographic digest derived from its stored value and/or its children's digests.
 
    Applying this property recursively means that we can represent entrie sub-tries by their root hash,
-   enabling an more powerful form of _lossy_ compression where, when the contents of a particular sub-trie are
-   irrelevant for a given operation, we can replace it by a stub containing just its root hash (see [`Trie::witness_for_keys`]).
+   enabling a powerful form of _lossy_ compression where, when the contents of a particular sub-trie are
+   irrelevant for a given operation, we can replace that sub-trie by a stub containing just its root hash
+   (see [`Trie::witness_for_keys`]).
 
-   Taking this to the limit, if we only care about trie identity (i.e., key-value pairs are irrelevant), we can
-   collapse the entire trie into just its root's digest and use that to peform equality checks (see [`Trie::hash_eq`]).
+   Taken to the limit, if we only care about trie identity (i.e., _all_ stored is irrelevant), we can
+   collapse the entire trie into just its root's digest and use that to peform equality checks
+   (see [`Trie::hash_eq`]).
 
-   In particular, the `TrieMode` parameter ensures that this kind of lossy compression can only occur when
-   explicitly enabled (it is _disabled_ by default).
+   In particular, the [`TrieMode`] parameter ensures that this kind of lossy compression
+   is _disabled by default_ and attempting to use is a _type error_; to enable it, call
+   [`Trie::to_parial`].
 
 4. _Generic_ - The implementation exposes the following user-settable generic parameters:
 
@@ -67,24 +70,19 @@ For implementation simplicity:
 ## Example Code
 
 ```rust
-use allocator_api2::alloc::Global;
-use sha2::Sha256;
-use merkle_trie::{Trie,Complete,Digest,Digestible};
+use {merkle_trie::{Trie,Complete,Digest,Digestible,utils::Global}, sha2::Sha256};
 
 #[derive(Clone, Debug)]
-struct MyCustomData(u64);
-impl Digestible for MyCustomData {
-    fn update_hasher<D: Digest>(&self, hasher: &mut D) {
-        hasher.update(&self.0.to_le_bytes())
-    }
+struct Data(u64);
+impl Digestible for Data {
+    fn update_hasher<D: Digest>(&self, hasher: &mut D) { hasher.update(&self.0.to_le_bytes()) }
 }
-
-type MyTrie = Trie<MyCustomData,4,2,Sha256,Global,Complete>;
+type MyTrie = Trie<Data,4,2,Sha256,Global,Complete>;
 
 let mut t: MyTrie = Trie::new();
-t.set(&[1,2,3    ], MyCustomData(45));
-t.set(&[1,2,4    ], MyCustomData(78));
-t.set(&[1,2,5    ], MyCustomData(127));
+t.set(&[1,2,3], Data(45));
+t.set(&[1,2,4], Data(78));
+t.set(&[1,2,5], Data(127));
 let delete_result = t.delete(&[1,2,4]);
 match delete_result {
    Ok(v) => println!("Old value at key was {v:?}"),
@@ -108,6 +106,25 @@ println!("Witness 1: {witness1:?}");
 let mut witness2 = t.clone().to_partial();
 witness2.witness_for_keys(vec![&[1,2,3]]);
 println!("Witness 2: {witness2:?}");
+```
+
+But, building a trie witness without changing its mode first is a type-error:
+
+```rust,compile_fail
+use {merkle_trie::{Trie,Complete,Digest,Digestible,utils::Global}, sha2::Sha256};
+
+#[derive(Clone, Debug)]
+struct Data(u64);
+impl Digestible for Data {
+    fn update_hasher<D: Digest>(&self, hasher: &mut D) { hasher.update(&self.0.to_le_bytes()) }
+}
+type MyTrie = Trie<Data,4,2,Sha256,Global,Complete>;
+
+let mut t: MyTrie = Trie::new();
+t.set(&[1,2,3], Data(45));
+
+// TYPE-ERROR: Calling partial-only operation on complete trie!
+t.witness_for_keys(vec![&[1,2,3]]);
 ```
 
 ## Details
