@@ -1,6 +1,4 @@
 //! Defines a trait [`Digestible`] which can be hashed via [`Digest`] functions.
-//! 
-//! Additionally defines [`Digestible`] impls for basic types.
 
 use digest::{Digest, Output};
 use crate::utils::to_hex;

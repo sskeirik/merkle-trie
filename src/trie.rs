@@ -1,4 +1,5 @@
 //! Merkle [`Trie`] type and its public API.
+
 use std::fmt::Debug;
 use allocator_api2::alloc::Global;
 use digest::{Digest, Output};

@@ -1,9 +1,10 @@
 //! Memory and debugging utility functions.
-//! 
+//!
 //! This module contains miscellaneous operations used by this library.
 //! In particular, it re-exports [`Allocator`] and [`Box`] from either
 //! the standard library or `allocator_api2`, depending on how this
 //! crate is compiled.
+
 #[cfg(not(feature = "std_allocator_api"))]
 pub use allocator_api2::{boxed::Box, alloc::Allocator};
 #[cfg(feature = "std_allocator_api")]

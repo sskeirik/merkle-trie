@@ -1,4 +1,5 @@
 //! Operations on bitstrings.
+
 use std::borrow::Borrow;
 use std::fmt::Debug;
 use crate::utils::{Allocator, Box, copy_slice_into_box};

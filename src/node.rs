@@ -1,4 +1,5 @@
 //! Internal Merkle [`Trie`] node representation and algorithms.
+
 use std::fmt::Debug;
 use std::collections::HashMap;
 use digest::{Digest, Output};
