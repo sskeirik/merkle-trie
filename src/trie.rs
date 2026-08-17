@@ -205,11 +205,21 @@ impl<T: Digestible, const N: usize, const K: usize, A: Allocator + Clone, H: Dig
     }
 }
 
-impl<T: Digestible, const N: usize, const K: usize, A: Allocator + Clone, H: Digest> Trie<T,N,K,H,A,Partial> {
-    /// Given a partial trie and a set of keys, compute the minimal partial trie
+
+impl<T: Digestible + Clone, const N: usize, const K: usize, A: Allocator + Clone, H: Digest> Trie<T,N,K,H,A,Complete> {
+    /// Given a complete, cloneable trie and a set of keys, build the minimal partial trie
     /// proves the non/existence of each key in the set in the trie
-    pub fn witness_for_keys(&mut self, keys: Vec<&[u8]>) {
-        self.1.witness_for_keys(keys);
+    pub fn to_witness_for_keys(&self, keys: Vec<&[u8]>) -> Trie<T,N,K,H,A,Partial> {
+        let witness_root = self.1.to_witness_for_keys(keys, self.0.clone());
+        Trie(self.0.clone(), witness_root)
+    }
+}
+
+impl<T: Digestible, const N: usize, const K: usize, A: Allocator + Clone, H: Digest> Trie<T,N,K,H,A,Partial> {
+    /// Given a partial trie and a set of keys, update this trie in-place to obtain a minimal partial trie that
+    /// proves the non/existence of each key in the set in the trie
+    pub fn prune_for_keys(&mut self, keys: Vec<&[u8]>) {
+        self.1.prune_for_keys(keys);
     }
 }
 

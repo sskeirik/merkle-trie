@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use digest::{Digest, Output};
 use crate::digestible::{Digestible, HashFrag, empty_hash};
 use crate::trie::{TrieError, NodeUpdate};
-use crate::utils::{Allocator, Box, NonNone, NonNoneMut, pick_mut_unchecked};
+use crate::utils::{Allocator, Box, NonNone, NonNoneMut, pick_unchecked, pick_mut_unchecked};
 use crate::bitseqops::{BitDiff, BitPosition, BitSeqOps, find_first_distinct_bits};
 #[allow(unused_imports)] // debugging or doc-comments
 use {
@@ -17,7 +17,6 @@ use {
 /// A node in a Merkleized, compressed trie.
 ///
 /// The `repr(C)` attribute ensures a consistent representation across the distinct [`TrieMode`]s
- #[derive(Clone)]
  #[repr(C)]
 pub(super) struct Node<T: Digestible, const N: usize, const K: usize, H: Digest, A: Allocator + Clone, M: TrieMode> {
     /// the whole bytes that must be matched to visit this node
@@ -26,10 +25,18 @@ pub(super) struct Node<T: Digestible, const N: usize, const K: usize, H: Digest,
     pub kind: Kind<T,N,K,H,A,M>,
 }
 
+impl<T: Digestible + Clone, const N: usize, const K: usize, A: Allocator + Clone, H:Digest, M: TrieMode> Clone for Node<T,N,K,H,A,M> {
+    fn clone(&self) -> Self {
+        Self {
+            key: self.key.clone(),
+            kind: self.kind.clone(),
+        } 
+    }
+}
+
 /// A generic Merkle trie node payload
 ///
 /// The `repr(C,u8)` attribute ensures a consistent representation across the distinct [`TrieMode`]s
-#[derive(Clone)]
 #[repr(C, u8)]
 pub(super) enum Kind<T: Digestible, const N: usize, const K: usize, H: Digest, A: Allocator + Clone, M: TrieMode> {
     /// A trie branch
@@ -50,14 +57,35 @@ pub(super) enum Kind<T: Digestible, const N: usize, const K: usize, H: Digest, A
     Opaque(Output<H>, M::Marker),
 }
 
+impl<T: Digestible + Clone, const N: usize, const K: usize, A: Allocator + Clone, H:Digest, M: TrieMode> Clone for Kind<T,N,K,H,A,M> {
+    fn clone(&self) -> Self {
+        use Kind::*;
+        match self {
+            Opaque(h, m) => Opaque(h.clone(), m.clone()),
+            Leaf { value , _phantom } => Leaf { value: value.clone(), _phantom: *_phantom },
+            Branch { mask, children } => {
+                Branch { mask: *mask, children: children.clone() }
+            }
+        }
+    }
+}
+
 /// The hash reference contained inside a [`NodeLink`]
 pub(super) type NodeLinkInner<T,const N: usize, const K: usize, H, A, M> = (Output<H>, Box<Node<T,N,K,H,A,M>, A>);
 
 /// A nullable link between [`Node`]s in a [`Trie`]
-#[derive(Clone)]
 pub(super) struct NodeLink<T: Digestible, const N: usize, const K: usize, H: Digest, A: Allocator + Clone, M: TrieMode>(
     pub Option<NodeLinkInner<T,N,K,H,A,M>>,
 );
+
+impl<T: Digestible + Clone, const N: usize, const K: usize, A: Allocator + Clone, H:Digest, M: TrieMode> Clone for NodeLink<T,N,K,H,A,M> {
+    fn clone(&self) -> Self {
+        match &self.0 {
+            None => Self(None),
+            Some((h, node)) => Self(Some((h.clone(), node.clone())))
+        }
+    }
+}
 
 // Opaque [`Trie`] Node Tag Type.
 mod sealed { pub trait SealedTrieMode {} }
@@ -327,6 +355,11 @@ impl<T: Digestible, const N: usize, const K: usize, H:Digest, A: Allocator + Clo
         NonNoneMut::new(&mut self.0)
     }
 
+    /// Return whether this link is terminal
+    fn is_terminal(&self) -> bool {
+        self.0.as_ref().is_none_or(|(_, node)| node.is_terminal())
+    }
+
     /// Generate a short node label for debugging purposes
     fn debug_label(&self) -> String {
         let Some((hash, node)) = self.0.as_ref() else {
@@ -349,6 +382,26 @@ impl<T: Digestible, const N: usize, const K: usize, H:Digest, A: Allocator + Clo
     /// Construct a new leaf node for this trie
     pub(super) fn new_leaf(key: Box<[u8],A>, value: T) -> Self {
         Self { key, kind: Kind::Leaf { value, _phantom: std::marker::PhantomData }}
+    }
+
+    /// Returns a reference to this node's children
+    /// 
+    /// SAFETY: must ensure caller node has [`Kind::Branch`]
+    pub(crate) unsafe fn as_children(&self) -> &[NodeLink<T,N,K,H,A,M>; K] {
+        match &self.kind {
+            Kind::Branch { children, .. } => children,
+            _ => unsafe { std::hint::unreachable_unchecked() },
+        }
+    }
+
+    /// Returns a mutable reference to this node's children
+    /// 
+    /// SAFETY: must ensure caller node has [`Kind::Branch`]
+    pub(crate) unsafe fn as_children_mut(&mut self) -> &mut [NodeLink<T,N,K,H,A,M>; K] {
+        match &mut self.kind {
+            Kind::Branch { children, .. } => children,
+            _ => unsafe { std::hint::unreachable_unchecked() },
+        }
     }
 
     /// Implement [`Trie::digest`] in a way that only requires examining the local node.
@@ -448,88 +501,188 @@ impl<T: Digestible, const N: usize, const K: usize, A: Allocator + Clone, H: Dig
     }
 }
 
-impl<T: Digestible, const N: usize, const K: usize, A: Allocator + Clone, H: Digest> NodeLink<T,N,K,H,A,Partial> {
-    /// Implement [`Trie::witness_for_keys`] via visiting every node reachable
-    /// by a key in `keys` and then pruning all nodes that are not reachable in this manner
-    pub(super) fn witness_for_keys(&mut self, mut keys: Vec<&[u8]>) {
-        keys.sort();
-        keys.dedup();
-        let keys: Vec<_> = keys.into_iter().map(|k| (k, 0)).collect();
-        let mut frontier = vec![(self, keys)];
-        let mut per_node_keys= HashMap::new();
-        let mut indices = Vec::with_capacity(K);
+/// Trait that can aids in walking trie structure using a per-level frontier.
+pub(super) trait TrieFrontierCursor<T: Digestible, const N: usize, const K: usize, H: Digest, A: Allocator + Clone>: Sized {
+    /// Returns a reference to the current trie node we are visiting
+    fn source(&self) -> &NodeLink<T,N,K,H,A,Partial>;
+    /// Performs some in-place mutation of a child of the node we are currently visiting
+    /// 
+    /// # SAFETY
+    /// 
+    /// The visited node must have [`Kind::Branch`] and `index`
+    /// must be a valid child node index for the node.
+    unsafe fn process_child(&mut self, idx: usize, found: bool);
+    /// Splits the currently visited node into a vector of child nodes
+    /// 
+    /// # SAFETY
+    /// 
+    /// The visited node must have [`Kind::Branch`] and the indices
+    /// must correspond to non-`None` child nodes.
+    unsafe fn into_children(self, indices: &[usize]) -> Vec<Self>;
+}
 
-        // in this loop, we repeatedly prune nodes that are NOT in our frontier
-        while !frontier.is_empty() {
-            frontier = frontier.into_iter().flat_map(|(link, keys)| {
-                // if the node doesn't exist or else is terminal, the current keys
-                // cannot be used to expand the frontier further, so stop exploration
-                let NodeLink(Some((_, node))) = &link else {
-                    return vec![];
-                };
-                if node.is_terminal() {
-                    return vec![];
-                }
+/// Given a set of keys, build a minimal witness for the given
+/// keys by walking over the trie structure, level-by-level,
+/// using a [`TrieFrontierCursor`].
+#[allow(clippy::single_match)]
+pub(super) fn to_witness_for_keys_generic<T: Digestible, const N: usize, const K: usize, H: Digest, A: Allocator + Clone>(context: impl TrieFrontierCursor<T,N,K,H,A>, mut keys: Vec<&[u8]>) {
+    keys.sort();
+    keys.dedup();
+    let keys: Vec<_> = keys.into_iter().map(|k| (k, 0)).collect();
+    let mut frontier = vec![(context, keys)];
+    let mut per_node_keys= HashMap::new();
+    let mut indices = Vec::with_capacity(K);
 
-                // clear structs for this iteration
-                per_node_keys.clear();
-                indices.clear();
+    // in this loop, we repeatedly prune nodes that are NOT in our frontier
+    while !frontier.is_empty() {
+        frontier = frontier.into_iter().flat_map(|(mut context, keys)| {
+            let link: &NodeLink<T,N,K,H,A,Partial> = context.source();
+            // if the node doesn't exist or else is terminal, the current keys
+            // cannot be used to expand the frontier further, so stop exploration
+            if link.is_terminal() {
+                return vec![];
+            }
 
-                // for each key, check whether that key can reach a particular child slot
-                // by running find with a zero-bound (disabling recursion into child nodes)
-                for (key, bits) in keys.into_iter() {
-                    link.probe(Some(0), key, BitPosition { index: 0, bits }, |_, res| {
-                        match res {
-                            // this key reached a child slot, which means we must continue
-                            // to check whether this key exists in the tree or not by computing
-                            // a mapping from child slot -> key suffixes
-                            ProbeResult::Bounded(_, pos, slot) => {
-                                let keys: &mut Vec<_> = per_node_keys.entry(slot).or_default();
-                                keys.push((&key[pos.index..], pos.bits));
-                            }
-                            // in any other case, we have determined concuslively
-                            // whether or not the key exists in the trie; no further
-                            // work is required for this key
-                            _ => {}
+            // clear structs for this iteration
+            per_node_keys.clear();
+            indices.clear();
+
+            // for each key, check whether that key can reach a particular child slot
+            // by running find with a zero-bound (disabling recursion into child nodes)
+            for (key, bits) in keys.into_iter() {
+                link.probe(Some(0), key, BitPosition { index: 0, bits }, |_, res| {
+                    match res {
+                        // this key reached a child slot, which means we must continue
+                        // to check whether this key exists in the tree or not by computing
+                        // a mapping from child slot -> key suffixes
+                        ProbeResult::Bounded(_, pos, slot) => {
+                            let keys: &mut Vec<_> = per_node_keys.entry(slot).or_default();
+                            keys.push((&key[pos.index..], pos.bits));
                         }
-                    })
-                };
-
-                let (_, node) = link.0.as_mut().expect("internal error: already checked option");
-                // SAFETY: we verified this node is a branch in the num_children check
-                // we cannot move this above because this conflicts with the borrow from `node.find` above
-                let children = match &mut node.kind {
-                    Kind::Branch { children , .. } => children,
-                    _ => unsafe { std::hint::unreachable_unchecked() },
-                };
-
-                // prune unreached children and collect reachable child indices in a vector
-                for idx in 0..K {
-                    if per_node_keys.contains_key(&idx) {
-                        indices.push(idx);
-                    } else {
-                        if let Some(NodeLink(Some((hash, child)))) = children.get_mut(idx) {
-                            child.kind = Kind::Opaque(hash.clone(), ())
-                        }
+                        // in any other case, we have determined conclusively
+                        // whether or not the key exists in the trie; no further
+                        // work is required for this key
+                        _ => {}
                     }
+                })
+            };
+
+            // prune unreached children and collect reachable child indices in a vector
+            for idx in 0..K {
+                let found = per_node_keys.contains_key(&idx);
+                if found {
+                    indices.push(idx);
                 }
+                unsafe { context.process_child(idx, found) };
+            }
 
-                // SAFETY: all indices are disjoint and in-bounds by construction from our loop above
-                // here, we grab unique mutable references to the reachable children of this node, which is valid due to disjointness
-                let local_frontier: Vec<_> = unsafe { pick_mut_unchecked(children, &indices) };
+            // SAFETY: all indices are disjoint and in-bounds by construction from our loop above
+            // here, we grab unique mutable references to the reachable children of this node, which is valid due to disjointness
+            let local_frontier: Vec<_> = unsafe { context.into_children(&indices) };
 
-                // finally, we expand the frontier vector for each child node
-                indices.iter().zip(local_frontier).map(|(child_idx, node)| {
-                    // let node = &mut *node.as_mut().expect("Child node must exist for index").1;
-                    let mut keys = per_node_keys.remove(child_idx).expect("Cannot fail to locate existing index");
-                    keys.sort();
-                    keys.dedup();
-                    (node, keys)
-                }).collect()
-            }).collect();
+            // finally, we expand the frontier vector for each child node
+            indices.iter().zip(local_frontier).map(|(child_idx, node)| {
+                let mut keys = per_node_keys.remove(child_idx).expect("Cannot fail to locate existing index");
+                keys.sort();
+                keys.dedup();
+                (node, keys)
+            }).collect()
+        }).collect();
+    }
+}
+
+/// A view of partial trie used to construct a witness in-place.
+impl<T: Digestible, const N: usize, const K: usize, H: Digest, A: Allocator + Clone> TrieFrontierCursor<T,N,K,H,A> for &mut NodeLink<T,N,K,H,A,Partial> {
+    fn source(&self) -> &NodeLink<T,N,K,H,A,Partial> {
+        self
+    }
+
+    unsafe fn process_child(&mut self, idx: usize, found: bool) {
+        if !found {
+            let children = unsafe { self.0.as_mut().expect("checked is branch").1.as_children_mut() };
+            if let Some(NodeLink(Some((hash, child)))) = children.get_mut(idx) {
+                child.kind = Kind::Opaque(hash.clone(), ())
+            }
         }
     }
 
+    unsafe fn into_children(self, indices: &[usize]) -> Vec<Self>
+    {
+        let children = unsafe { self.0.as_mut().expect("checked is branch").1.as_children_mut() };
+        unsafe { pick_mut_unchecked( &mut children[..], indices) }
+    }
+}
+
+impl<T: Digestible, const N: usize, const K: usize, A: Allocator + Clone, H: Digest> NodeLink<T,N,K,H,A,Partial> {
+    /// Implement [`Trie::witness_for_keys`] via visiting every node reachable
+    /// by a key in `keys` and then pruning all nodes that are not reachable in this manner
+    pub(super) fn prune_for_keys(&mut self, keys: Vec<&[u8]>) {
+        to_witness_for_keys_generic(self, keys);
+    }
+}
+
+/// A view of [`Complete`] Trie node paired with a [`Partial`] clone of itself
+/// that is used to build a witness from a Trie by only cloning their shared super-Trie
+struct WitnessBuilder<'src, 'tgt, T: Digestible + Clone, const N: usize, const K: usize, H: Digest, A: Allocator + Clone>(
+    &'src NodeLink<T,N,K,H,A,Complete>,
+    &'tgt mut NodeLink<T,N,K,H,A,Partial>,
+    A
+);
+
+impl<'src, 'tgt, T: Digestible + Clone, const N: usize, const K: usize, H: Digest, A: Allocator + Clone> TrieFrontierCursor<T,N,K,H,A> for WitnessBuilder<'src,'tgt,T,N,K,H,A> {
+    fn source(&self) -> &NodeLink<T,N,K,H,A,Partial> {
+        unsafe { std::mem::transmute(&self.0) } 
+    }
+
+    unsafe fn process_child(&mut self, idx: usize, found: bool) {
+        let src_children = unsafe { self.0.0.as_ref().unwrap_unchecked().1.as_children() };
+        let tgt_children = unsafe { self.1.0.as_mut().unwrap_unchecked().1.as_children_mut() };
+        if found {
+            tgt_children[idx] = src_children[idx].clone_as_leaf();
+        } else {
+            if let Some(NodeLink(Some((hash, child)))) = src_children.get(idx) {
+                let node = Node { key: child.key.clone(), kind: Kind::Opaque(hash.clone(),()) };
+                tgt_children[idx] = NodeLink(Some((hash.clone(), Box::new_in(node, self.2.clone()))));
+            }
+        }
+    }
+
+    unsafe fn into_children(self, indices: &[usize]) -> Vec<Self> {
+        let src_children = unsafe { self.0.0.as_ref().unwrap_unchecked().1.as_children() };
+        let tgt_children = unsafe { self.1.0.as_mut().unwrap_unchecked().1.as_children_mut() };
+
+        let sel_src_children: Vec<_> = unsafe { pick_unchecked(src_children, indices) };
+        let sel_tgt_children: Vec<_> = unsafe { pick_mut_unchecked(tgt_children, indices) };
+
+        sel_src_children.into_iter().zip(sel_tgt_children).map(|(src,tgt)| Self(src,tgt,self.2.clone())).collect()
+    }
+}
+
+impl<T: Digestible + Clone, const N: usize, const K: usize, A: Allocator + Clone, H: Digest> NodeLink<T,N,K,H,A,Complete> {
+    /// The internal implementation of [`Trie::witness_for_keys`]
+    pub fn to_witness_for_keys(&self, keys: Vec<&[u8]>, alloc: A) -> NodeLink<T,N,K,H,A,Partial> {
+        let mut new_root = self.clone_as_leaf();
+        let builder = WitnessBuilder(self, &mut new_root, alloc);
+        to_witness_for_keys_generic(builder, keys);
+        new_root
+    }
+
+    fn clone_as_leaf(&self) -> NodeLink<T,N,K,H,A,Partial> {
+        use Kind::*;
+        let NodeLink(Some((hash, node))) = self else {
+            return NodeLink(None)
+        };
+        let node: Box<Node<T,N,K,H,A,Complete>, A> = match node.kind {
+            Leaf { .. } => node.clone(),
+            Branch { mask, .. } => {
+                let key_copy = node.key.clone();
+                let node_copy = Node::new_branch(key_copy, mask);
+                Box::new_in(node_copy, Box::allocator(node).clone())
+            }
+            Opaque(_, tag) => match tag {},
+        };
+        NodeLink(Some((hash.clone(), node))).into_partial()
+    }
 }
 
  /// Node equality is just equality of its node structure.
@@ -650,7 +803,7 @@ mod witness_tests {
         t.set(&[1,2,4,], W(43)).unwrap();
         println!("Orignal: {t:?}");
         let mut t = t.to_partial();
-        t.witness_for_keys(vec![&[1]]);
+        t.prune_for_keys(vec![&[1]]);
         println!("Witness: {t:?}");
     }
 

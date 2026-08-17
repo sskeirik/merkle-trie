@@ -82,6 +82,17 @@ pub unsafe fn pick_mut_unchecked<'a, T>(arr: &'a mut [T], indices: &[usize]) -> 
     indices.iter().map(|&i| unsafe { &mut *ptr.add(i) }).collect()
 }
 
+/// Given an input slice and a list of `indices`, return a vector of mutable references for each indexed element
+///
+/// # SAFETY
+/// 
+/// Caller must ensure that each index in the `indices` array is in-bounds for the input slice and that it contains no duplicates.
+pub unsafe fn pick_unchecked<'a, T>(arr: &'a [T], indices: &[usize]) -> Vec<&'a T> {
+    let ptr = arr.as_ptr();
+    // SAFETY: by assumption
+    indices.iter().map(|&i| unsafe { & *ptr.add(i) }).collect()
+}
+
 /// Given a byte slice and an allocator, create a new allocator-owned copy of that slice
 pub fn copy_slice_into_box<A: Allocator>(src: &[u8], alloc: A) -> Box<[u8], A> {
     let mut boxed = Box::new_uninit_slice_in(src.len(), alloc);
