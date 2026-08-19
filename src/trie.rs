@@ -6,6 +6,7 @@ use crate::node::{Node, NodeLink, TrieMode};
 use crate::utils::{Allocator, Box, copy_slice_into_box};
 use allocator_api2::alloc::Global;
 use digest::{Digest, Output};
+use std::borrow::Borrow;
 use std::fmt::Debug;
 
 /// Errors that can occur while performing [`Trie`] operations.
@@ -181,6 +182,43 @@ impl<T: Digestible, const N: usize, const K: usize, H: Digest, A: Allocator + Cl
     pub fn get<'a>(&'a self, target_key: &[u8]) -> Result<Option<&'a T>, TrieError> {
         Self::check_key(target_key)?;
         Ok(self.1.get(target_key))
+    }
+
+    /// Given an iterator of (key, expected_presence) pairs,
+    /// return an iterator where each value is either:
+    ///
+    /// - `Err()` indicating an ill-formed input error,
+    /// - `Ok(None)` indicating key's presence was expected
+    /// - `Ok(Some((idx,true)))` indicating key's presence was unexpected,
+    /// - `Ok(Some((idx,false)))` indicating key's presence was unknown,
+    /// 
+    /// Note that the final case is only possible for [`Partial`] tries
+    /// where some nodes have been pruned.
+    pub fn verify_each_key<'a>(
+        &'a self,
+        keys_and_expected: impl Iterator<Item = (&'a [u8], bool)> + 'a,
+    ) -> impl Iterator<Item = Result<Option<bool>, TrieError>> + 'a {
+        keys_and_expected.map(|(target_key, expected)| {
+            Self::check_key(target_key)?;
+            let found = self.1.verify(target_key);
+            if found != Some(expected) {
+                Ok(Some(found.is_some()))
+            } else {
+                Ok(None)
+            }
+        })
+    }
+
+    /// Given a target keys vector and an expected presence vector,
+    /// return true iff each key's presence in the trie provably matches its expected presence;
+    /// return false otherwise or if any key has an invalid length.
+    pub fn verify_keys<'a>(&self, target_keys: impl Borrow<Vec<&'a [u8]>>, expected: impl Borrow<Vec<bool>>) -> bool {
+        let (target_keys,expected) = (target_keys.borrow(), expected.borrow());
+        if target_keys.len() != expected.len() {
+            return false
+        }
+        let iter = target_keys.iter().copied().zip(expected.iter().copied());
+        self.verify_each_key(iter).all(|res| res.is_ok_and(|opt| opt.is_none()))
     }
 
     /// Return the digest of the trie

@@ -15,6 +15,7 @@ use std::fmt::Write;
 pub use std::{alloc::Allocator, boxed::Box};
 
 /// A shared reference to an [`Option`] that must be non-`None`
+#[derive(Debug)]
 pub struct NonNone<'a, T>(&'a Option<T>);
 impl<'a, T> NonNone<'a, T> {
     pub fn new(opt: &'a Option<T>) -> Option<Self> {
@@ -38,6 +39,7 @@ impl<'a, T> NonNone<'a, T> {
 }
 
 /// A mutable reference to an [`Option`] that must be non-`None`
+#[derive(Debug)]
 pub struct NonNoneMut<'a, T>(&'a mut Option<T>);
 impl<'a, T> NonNoneMut<'a, T> {
     pub fn new(opt: &'a mut Option<T>) -> Option<Self> {

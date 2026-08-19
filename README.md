@@ -99,15 +99,26 @@ let trie_clone = t.clone();
 println!("Trie clone: {trie_clone:?}");
 
 // build witnesses
-let mut witness1 = t.clone().to_partial();
-witness1.prune_for_keys(vec![&[1,2]]);
+// NOTE: these construction techniques require `T: Clone`
+// as the witness tries may actually contain the underlying
+// trie values on leaf nodes
+let witness1 = t.to_witness_for_keys(vec![&[1,2,3]]);
 println!("Witness 1: {witness1:?}");
 
-let witness2 = t.to_witness_for_keys(vec![&[1,2,3]]);
+let mut witness2 = t.clone().to_partial();
+witness2.prune_for_keys(vec![&[1,2]]);
 println!("Witness 2: {witness2:?}");
+
+// verify witnesses
+// NOTE: the second call fails to verify because the trie was over-pruned
+let keys: Vec<&[u8]> = vec![&[1,2,3], &[1,2,4], &[1,2,5]];
+let expected = vec![true,false,false];
+assert_eq!(witness1.verify_keys(&keys, &expected), true);
+println!("HERE");
+assert_eq!(witness2.verify_keys( keys,  expected), false);
 ```
 
-But, building a trie witness without changing its mode first is a type-error:
+But, calling `prune_for_keys` on a [`Complete`] Trie is a type-error:
 
 ```rust,compile_fail
 use {merkle_trie::{Trie,Complete,Digest,Digestible,utils::Global}, sha2::Sha256};

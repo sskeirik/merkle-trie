@@ -171,6 +171,7 @@ pub trait TrieMode: sealed::SealedTrieMode {
 }
 
 /// A probe result to be handled by a probe action
+#[derive(Debug)]
 enum ProbeResult<L, N> {
     /// An empty child slot corresponding to the probe key was found at N
     EmptySlot(L),
@@ -488,6 +489,40 @@ impl<T: Digestible, const N: usize, const K: usize, H: Digest, A: Allocator + Cl
         self.probe(None, search_key, BitPosition { index: 0, bits: 0 }, action)
     }
 
+    /// Given a search key, return:
+    /// `None` - if the key's presence in the trie is unknowable (due to opaque nodes),
+    /// `Some(true)` - if the key is in the trie,
+    /// `Some(false)` - if the key is NOT in the trie.
+    pub(super) fn verify<'a>(&'a self, search_key: &[u8]) -> Option<bool> {
+        use ProbeResult::*;
+        let action =
+            |_pos, result: ProbeResult<(), NonNone<'a, NodeLinkInner<T, N, K, H, A, M>>>| {
+                match result {
+                    ExactMatch(node) => {
+                        if matches!(node.get().1.kind, Kind::Opaque(..)) {
+                            None
+                        } else {
+                            Some(true)
+                        }
+                    }
+                    EmptySlot(..) => {
+                        Some(false)
+                    }
+                    // if disagreement is such that we could continue exploration
+                    // from an opaque, give up; otherwise, we found a true negative
+                    Disagreement(node, diff) => {
+                        if diff.prefix == Some(1) && matches!(node.get().1.kind, Kind::Opaque(..)) {
+                            None
+                        } else {
+                            Some(false)
+                        }
+                    }
+                    Bounded(..) => panic!("unreachable because no bound specified"),
+                }
+            };
+        self.probe(None, search_key, BitPosition { index: 0, bits: 0 }, action)
+    }
+
     /// Return the digest stored at this [`NodeLink`]
     pub(super) fn stored_digest(&self) -> Output<H> {
         self.0
@@ -659,9 +694,6 @@ impl<T: Digestible, const N: usize, const K: usize, A: Allocator + Clone, H: Dig
         // A" even though A is identical on both sides). `transmute_copy` performs
         // the same bit-for-bit reinterpretation without that compile-time check, so
         // the `const` assertion below is what actually carries the safety proof.
-        // SAFETY: see `to_partial` -- Self and Node<T,N,K,H,A,Partial> are layout-identical,
-        // so the pointee behind the box may be reinterpreted; the allocator is threaded
-        // through unchanged so the box can later be freed in the same allocator it came from.
         const {
             assert!(
                 std::mem::size_of::<Self>()
@@ -983,7 +1015,7 @@ impl<
 
 /// The debug format of a node is a nested presentation of the trie structure
 impl<
-    T: Digestible + Debug,
+    T: Digestible,
     const N: usize,
     const K: usize,
     H: Digest,
@@ -997,7 +1029,21 @@ impl<
 }
 
 impl<
-    T: Digestible + Debug,
+    T: Digestible,
+    const N: usize,
+    const K: usize,
+    H: Digest,
+    A: Allocator + Clone,
+    M: TrieMode,
+> Debug for Node<T, N, K, H, A, M>
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.debug_fmt(0, f)
+    }
+}
+
+impl<
+    T: Digestible,
     const N: usize,
     const K: usize,
     H: Digest,
@@ -1019,31 +1065,49 @@ impl<
         }
         if let Some((hash, node)) = self.0.as_ref() {
             write!(f, "{} -> ", HashFrag::<H>(hash))?;
-            match &node.kind {
-                Kind::Leaf { value, .. } => {
-                    write!(f, "L({}, {:?})", to_bin::<false>(&node.key), value)
-                }
-                Kind::Branch { mask, children, .. } => {
-                    write!(
-                        f,
-                        "B({}, {}, ",
-                        to_bin::<false>(&node.key),
-                        to_bin::<false>(&[*mask])
-                    )?;
-                    for (idx, child) in children.iter().enumerate() {
-                        writeln!(f)?;
-                        Self::debug_fmt(child, depth + 1, Some(idx), f)?;
-                    }
-                    write!(f, "\n{})", space)
-                }
-                Kind::Opaque(..) => write!(f, "O({})", HashFrag::<H>(hash)),
-            }
+            Node::debug_fmt(node, depth, f)
         } else {
             if depth == 0 {
                 write!(f, "Trie(Empty)")
             } else {
                 write!(f, "E")
             }
+        }
+    }
+}
+
+impl<
+    T: Digestible,
+    const N: usize,
+    const K: usize,
+    H: Digest,
+    A: Allocator + Clone,
+    M: TrieMode,
+> Node<T, N, K, H, A, M> {
+    pub(super) fn debug_fmt(
+        &self,
+        depth: usize,
+        f: &mut std::fmt::Formatter<'_>,
+    ) -> std::fmt::Result {
+        let space = " ".repeat(depth * 2);
+        match &self.kind {
+            Kind::Leaf { .. } => {
+                write!(f, "L({}, ..)", to_bin::<false>(&self.key))
+            }
+            Kind::Branch { mask, children, .. } => {
+                write!(
+                    f,
+                    "B({}, {}, ",
+                    to_bin::<false>(&self.key),
+                    to_bin::<false>(&[*mask])
+                )?;
+                for (idx, child) in children.iter().enumerate() {
+                    writeln!(f)?;
+                    NodeLink::debug_fmt(child, depth + 1, Some(idx), f)?;
+                }
+                write!(f, "\n{})", space)
+            }
+            Kind::Opaque(hash, _) => write!(f, "O({})", HashFrag::<H>(hash)),
         }
     }
 }
