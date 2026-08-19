@@ -634,9 +634,9 @@ impl<T: Digestible, const N: usize, const K: usize, H: Digest, A: Allocator + Cl
         }
     }
 
-    /// Return the number of children stored under this node
+    /// Return whether this node is terminal (i.e., has no children to recurse into)
     fn is_terminal(&self) -> bool {
-        matches!(self.kind, Kind::Branch { .. })
+        !matches!(self.kind, Kind::Branch { .. })
     }
 }
 
