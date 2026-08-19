@@ -870,7 +870,13 @@ impl<
 > TrieFrontierCursor<T, N, K, H, A> for WitnessBuilder<'src, 'tgt, T, N, K, H, A>
 {
     fn source(&self) -> &NodeLink<T, N, K, H, A, Partial> {
-        unsafe { std::mem::transmute(&self.0) }
+        // SAFETY: NodeLink<..., Complete> and NodeLink<..., Partial> are
+        // layout-identical, but note that self.0 is _already_ a ref;
+        // if we attempt transmute &self.0, we are reinterpreting a
+        // ref-to-ref as a ref, which obviously is wrong. The fact
+        // that Rust does silently converts between ref'ed types in
+        // other contexts makes this requirement slightly less obvious
+        unsafe { std::mem::transmute(self.0) }
     }
 
     unsafe fn process_child(&mut self, idx: usize, found: bool) {
@@ -1135,17 +1141,17 @@ mod witness_tests {
             Err(e) => println!("Error {e} occurred"),
         }
 
-        // // if Trie data supports Clone/Debug, so does Trie
-        // let trie_clone = t.clone();
-        // println!("Trie clone: {trie_clone:?}");
+        // if Trie data supports Clone/Debug, so does Trie
+        let trie_clone = t.clone();
+        println!("Trie clone: {trie_clone:?}");
 
-        // // build witnesses
-        // let mut witness1 = t.clone().to_partial();
-        // witness1.witness_for_keys(vec![&[1,2]]);
-        // println!("Witness 1: {witness1:?}");
+        // build witnesses
+        let mut witness1 = t.clone().to_partial();
+        witness1.prune_for_keys(vec![&[1,2]]);
+        println!("Witness 1: {witness1:?}");
 
-        // let mut witness2 = t.clone().to_partial();
-        // witness2.witness_for_keys(vec![&[1,2,3]]);
-        // println!("Witness 2: {witness2:?}");
+        println!("TOWITNESSFORKEYS");
+        let witness2 = t.to_witness_for_keys(vec![&[1,2,3]]);
+        println!("Witness 2: {witness2:?}");
     }
 }

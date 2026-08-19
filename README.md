@@ -100,11 +100,10 @@ println!("Trie clone: {trie_clone:?}");
 
 // build witnesses
 let mut witness1 = t.clone().to_partial();
-witness1.witness_for_keys(vec![&[1,2]]);
+witness1.prune_for_keys(vec![&[1,2]]);
 println!("Witness 1: {witness1:?}");
 
-let mut witness2 = t.clone().to_partial();
-witness2.witness_for_keys(vec![&[1,2,3]]);
+let witness2 = t.to_witness_for_keys(vec![&[1,2,3]]);
 println!("Witness 2: {witness2:?}");
 ```
 
@@ -124,7 +123,7 @@ let mut t: MyTrie = Trie::new();
 t.set(&[1,2,3], Data(45));
 
 // TYPE-ERROR: Calling partial-only operation on complete trie!
-t.witness_for_keys(vec![&[1,2,3]]);
+t.prune_for_keys(vec![&[1,2,3]]);
 ```
 
 ## Details
