@@ -1,12 +1,12 @@
 //! Operations on bitstrings.
 
+use crate::utils::{Allocator, Box, copy_slice_into_box};
 use std::borrow::Borrow;
 use std::fmt::Debug;
-use crate::utils::{Allocator, Box, copy_slice_into_box};
 #[allow(unused_imports)] // used for debug purposes
 use {
-    tracing::instrument,
     crate::utils::{to_ascii, to_bin, to_hex},
+    tracing::instrument,
 };
 
 /// Given a bit index `i` in a byte, create a mask that selects indices `j` s.t. `0 <= j <= i`
@@ -18,7 +18,7 @@ pub(crate) fn isolate_prefix_mask(bits: usize) -> u8 {
 /// Given a bit index `i` in a byte, create a mask that selects indices `j` s.t. `i < j <= 7``
 #[inline]
 pub(crate) fn isolate_suffix_mask(bits: usize) -> u8 {
-    ! isolate_prefix_mask(bits)
+    !isolate_prefix_mask(bits)
 }
 
 /// Given a source bitmask, create a bitmask that selects the leading zeroes of the source mask
@@ -75,17 +75,33 @@ pub struct BitDiff {
 
 /// Return the index of the first bit, after the offset bits, that distinguishes the two input strings.
 /// If one bit string is a prefix of the other, the extra bits are considered to be distinct.
-#[tracing::instrument(level = "debug", skip(a,b))]
-pub fn find_first_distinct_bits(a: &[u8], b: &[u8], offset: usize, a_bits: Option<usize>, b_bits: Option<usize>) -> Option<BitDiff> {
+#[tracing::instrument(level = "debug", skip(a, b))]
+pub fn find_first_distinct_bits(
+    a: &[u8],
+    b: &[u8],
+    offset: usize,
+    a_bits: Option<usize>,
+    b_bits: Option<usize>,
+) -> Option<BitDiff> {
+    #[inline]
+    fn mkdiff(i: usize, b: usize, p: Option<usize>) -> Option<BitDiff> {
+        Some(BitDiff {
+            pos: BitPosition { index: i, bits: b },
+            prefix: p,
+        })
+    }
 
     // set default length
-    let a_bits = a_bits.unwrap_or(a.len()*8 - offset);
-    let b_bits = b_bits.unwrap_or(b.len()*8 - offset);
+    let a_bits = a_bits.unwrap_or(a.len() * 8 - offset);
+    let b_bits = b_bits.unwrap_or(b.len() * 8 - offset);
 
     // check wanted vs. actual bits
-    let actual_bits = (a.len()*8).min(b.len()*8);
+    let actual_bits = (a.len() * 8).min(b.len() * 8);
     let wanted_bits = a_bits.min(b_bits);
-    debug_assert!(offset + wanted_bits <= actual_bits, "requested bits would overflow underlying buffer");
+    debug_assert!(
+        offset + wanted_bits <= actual_bits,
+        "requested bits would overflow underlying buffer"
+    );
 
     // get start byte
     let mut i = offset / 8;
@@ -96,13 +112,13 @@ pub fn find_first_distinct_bits(a: &[u8], b: &[u8], offset: usize, a_bits: Optio
         let isolate_suffix = !((1 << offset_bits) - 1);
         let v = (a[i] ^ b[i]) & isolate_suffix;
         if v != 0 {
-            return Some(BitDiff { pos: BitPosition { index: i, bits: v.trailing_zeros() as usize % 8 }, prefix: None });
+            return mkdiff(i, v.trailing_zeros() as usize % 8, None);
         }
         // if we need to read more bits, advance; otherwise, they are equal
         if offset + wanted_bits > 8 {
             i += 1;
         } else {
-            return None
+            return None;
         }
     }
 
@@ -115,17 +131,23 @@ pub fn find_first_distinct_bits(a: &[u8], b: &[u8], offset: usize, a_bits: Optio
     // get end byte
     let n = aligned_wanted_bytes;
 
-    tracing::debug!("Splitting up to {n} bytes, {extra_bits} bits, from a:{}:{} and b:{}:{}", a_bits, to_bin::<false>(a), b_bits, to_bin::<false>(b));
+    tracing::debug!(
+        "Splitting up to {n} bytes, {extra_bits} bits, from a:{}:{} and b:{}:{}",
+        a_bits,
+        to_bin::<false>(a),
+        b_bits,
+        to_bin::<false>(b)
+    );
 
     // Process 8-byte chunks
     while i + 8 <= n {
-        let xa = u64::from_le_bytes(a[i..i+8].try_into().unwrap());
-        let xb = u64::from_le_bytes(b[i..i+8].try_into().unwrap());
+        let xa = u64::from_le_bytes(a[i..i + 8].try_into().unwrap());
+        let xb = u64::from_le_bytes(b[i..i + 8].try_into().unwrap());
         let v = xa ^ xb;
         if v != 0 {
             let trailing = v.trailing_zeros() as usize; // 0..63
             let extra_bytes = trailing / 8;
-            return Some(BitDiff { pos: BitPosition { index: i + extra_bytes, bits: trailing % 8 }, prefix: None });
+            return mkdiff(i + extra_bytes, trailing % 8, None);
         }
         i += 8;
     }
@@ -134,24 +156,31 @@ pub fn find_first_distinct_bits(a: &[u8], b: &[u8], offset: usize, a_bits: Optio
     while i < n {
         let v = a[i] ^ b[i];
         if v != 0 {
-            return Some(BitDiff { pos: BitPosition { index: i, bits: v.trailing_zeros() as usize % 8 }, prefix: None });
+            return mkdiff(i, v.trailing_zeros() as usize % 8, None);
         }
         i += 1;
     }
 
     // Final bits
     if isolate_extra_bits != 0 {
-        tracing::debug!("Extra bits mask: {}", to_bin::<false>(&[isolate_extra_bits]));
+        tracing::debug!(
+            "Extra bits mask: {}",
+            to_bin::<false>(&[isolate_extra_bits])
+        );
         let v = (a[i] ^ b[i]) & isolate_extra_bits;
         if v != 0 {
-            return Some(BitDiff { pos: BitPosition { index: i, bits: v.trailing_zeros() as usize % 8 }, prefix: None });
+            return mkdiff(i, v.trailing_zeros() as usize % 8, None);
         }
     }
 
     // If lengths differ, the extra bits are "different"
     if a_bits != b_bits {
         tracing::debug!("Split aux returned prefix: {i}");
-        return Some(BitDiff { pos: BitPosition { index: i, bits: (offset + wanted_bits) % 8 }, prefix: Some((a_bits > b_bits) as usize) });
+        return mkdiff(
+            i,
+            (offset + wanted_bits) % 8,
+            Some((a_bits > b_bits) as usize),
+        );
     }
 
     // Otherwise, they are identical
@@ -175,12 +204,20 @@ impl BitDiff {
     /// Given a bit diff and src bitstring, copy the bits from src in the range [0,align(log2(K),diff.pos)).
     /// In order to account for non-byte-aligned bitlengths, we write an extra final byte.
     /// Any bits in this final byte which are not contained in the prefix will be zeroed out.
-    pub fn write_prefix<const K: usize, A: Allocator + Clone>(&self, src: &[u8], alloc: A) -> Box<[u8], A> {
+    pub fn write_prefix<const K: usize, A: Allocator + Clone>(
+        &self,
+        src: &[u8],
+        alloc: A,
+    ) -> Box<[u8], A> {
         BitSeqOps::<K>::write_aligned_prefix(self, src, alloc)
     }
 
     /// Given a bit diff and src bitstring, copy the bits from src in the range [align(log2(K),diff.pos),src.len()*8).
-    pub fn write_suffix<const K: usize, A: Allocator + Clone>(&self, src: &[u8], alloc: A) -> Box<[u8], A> {
+    pub fn write_suffix<const K: usize, A: Allocator + Clone>(
+        &self,
+        src: &[u8],
+        alloc: A,
+    ) -> Box<[u8], A> {
         BitSeqOps::<K>::write_aligned_suffix(&self.pos, src, alloc)
     }
 }
@@ -200,7 +237,10 @@ impl<const K: usize> BitSeqOps<K> {
     #[inline]
     pub fn increment(pos: &BitPosition) -> BitPosition {
         let newpos = pos.index * 8 + pos.bits + Self::K_BITS;
-        BitPosition { index: newpos / 8, bits: newpos % 8 }
+        BitPosition {
+            index: newpos / 8,
+            bits: newpos % 8,
+        }
     }
 
     /// Given a bit offset in a byte, find the unique bitmask of length log2(K),
@@ -223,20 +263,34 @@ impl<const K: usize> BitSeqOps<K> {
 
     /// Given a bit diff and src bitstring, copy the bits from src in the range [0,align(log2(K),diff.pos)).
     /// In order to account for non-byte-aligned bitlengths, we write an extra final byte.
-    #[instrument(level="debug", skip_all)]
-    pub fn write_aligned_prefix<A: Allocator + Clone>(diff: &BitDiff, src: &[u8], alloc: A) -> Box<[u8],A> {
-        debug_assert!(diff.prefix.is_none(), "this operation is invalid for bitstrings without a diff");
-        let BitDiff { pos: BitPosition { index, bits, }, .. } = diff;
+    #[instrument(level = "debug", skip_all)]
+    pub fn write_aligned_prefix<A: Allocator + Clone>(
+        diff: &BitDiff,
+        src: &[u8],
+        alloc: A,
+    ) -> Box<[u8], A> {
+        debug_assert!(
+            diff.prefix.is_none(),
+            "this operation is invalid for bitstrings without a diff"
+        );
+        let BitDiff {
+            pos: BitPosition { index, bits },
+            ..
+        } = diff;
         // since there may be diff bits in the final byte, we must include it
-        let mut dst = copy_slice_into_box(&src[..index+1], alloc);
+        let mut dst = copy_slice_into_box(&src[..index + 1], alloc);
         // we isolate the bits that precede the diff
         dst[*index] &= tz_mask(Self::mask(*bits));
         dst
     }
 
     /// Given a bit diff and src bitstring, copy the bits from src in the range [align(log2(K),diff.pos),src.len()*8).
-    #[instrument(level="debug", skip_all)]
-    pub fn write_aligned_suffix<A: Allocator + Clone>(pos: &BitPosition, src: &[u8], alloc: A) -> Box<[u8],A> {
+    #[instrument(level = "debug", skip_all)]
+    pub fn write_aligned_suffix<A: Allocator + Clone>(
+        pos: &BitPosition,
+        src: &[u8],
+        alloc: A,
+    ) -> Box<[u8], A> {
         let suffix_len = src.len() - pos.index;
         if suffix_len == 0 {
             return copy_slice_into_box(&[], alloc);
@@ -249,16 +303,23 @@ impl<const K: usize> BitSeqOps<K> {
 
     /// Given a prefix, mask, mask_value, and suffix generated by the same [`BitDiff`] and src buffer,
     /// reverse the split to recover a boxed slice whose contents equal the src buffer
-    #[instrument(level="debug", skip_all)]
-    pub fn recover<A: Allocator + Clone>(prefix: impl Borrow<[u8]>, mask: u8, mask_value: u8, suffix: impl Borrow<[u8]>, alloc: A) -> Box<[u8],A> {
+    #[instrument(level = "debug", skip_all)]
+    pub fn recover<A: Allocator + Clone>(
+        prefix: impl Borrow<[u8]>,
+        mask: u8,
+        mask_value: u8,
+        suffix: impl Borrow<[u8]>,
+        alloc: A,
+    ) -> Box<[u8], A> {
         let prefix = prefix.borrow();
         let suffix = suffix.borrow();
         debug_assert!(!(prefix.is_empty() || suffix.is_empty()));
-        let merged_key = Box::<[u8],A>::new_uninit_slice_in(prefix.len() + suffix.len() - 1, alloc);
+        let merged_key =
+            Box::<[u8], A>::new_uninit_slice_in(prefix.len() + suffix.len() - 1, alloc);
         let mut merged_key = unsafe { merged_key.assume_init() };
         merged_key[0..prefix.len()].copy_from_slice(prefix);
-        merged_key[prefix.len()-1] |= mask_value << mask.trailing_zeros();
-        merged_key[prefix.len()-1] |= suffix[0];
+        merged_key[prefix.len() - 1] |= mask_value << mask.trailing_zeros();
+        merged_key[prefix.len() - 1] |= suffix[0];
         if suffix.len() > 1 {
             merged_key[prefix.len()..].copy_from_slice(suffix);
         }
@@ -291,12 +352,13 @@ mod test {
     #[test]
     fn test_find_first_distinct_bits_diff() {
         // Static byte slices used to build expected splits, i.e., prefix/suffix pairs
-        const Z:   &[u8] = &[0u8];
-        const O:   &[u8] = &[1u8];
-        const H:   &[u8] = &[0b10000000u8];
-        const Z8:  &[u8] = &[0u8; 8];
+        const Z: &[u8] = &[0u8];
+        const O: &[u8] = &[1u8];
+        const H: &[u8] = &[0b10000000u8];
+        const Z8: &[u8] = &[0u8; 8];
 
         type BitSplit = (bool, u8, Vec<u8>, Vec<u8>, Vec<u8>, usize, usize);
+        #[rustfmt::skip]
         fn mk_bit_split<const K: usize>(diff: &BitDiff, a: &[u8], b: &[u8]) -> BitSplit {
             let p = BitSeqOps::<K>::write_aligned_prefix(&diff, a, Global).to_vec();
             let a_s = BitSeqOps::<K>::write_aligned_suffix(&diff.pos, a, Global).to_vec();
@@ -318,6 +380,7 @@ mod test {
             (diff.prefix.is_some(), mask, p, a_s, b_s, a_i, b_i)
         }
 
+        #[rustfmt::skip]
         fn d(pre: &'static [u8], sa: &'static [u8], sb: &'static [u8], mask: u8, values: [usize; 2]) -> Option<BitSplit> {
             Some((false, mask, pre.to_vec(), sa.to_vec(), sb.to_vec(), values[0], values[1]))
         }
@@ -403,7 +466,8 @@ mod test {
         for (idx, (in1, in2)) in inputs.iter().enumerate() {
             println!("Loop Idx: {idx}");
 
-            let bit_diff = find_first_distinct_bits(in1, in2, 0, Some(in1.len()*8), Some(in2.len()*8));
+            let bit_diff =
+                find_first_distinct_bits(in1, in2, 0, Some(in1.len() * 8), Some(in2.len() * 8));
             println!("BitDiff: {:?}", bit_diff);
 
             let res_1 = bit_diff.as_ref().map(|v| mk_bit_split::<2>(v, in1, in2));
@@ -436,9 +500,10 @@ mod test {
             (&[0,0b00010000], &[0,0b11110000, 1], 12),  // partial byte prefix with extra bytes
         ];
 
-        for (a,b, a_bits) in inputs.into_iter() {
-            let diff = find_first_distinct_bits(a, b, 0, Some(a_bits), None).expect("failed to find prefix");
-            let expected_bytes =  a_bits / 8;
+        for (a, b, a_bits) in inputs.into_iter() {
+            let diff = find_first_distinct_bits(a, b, 0, Some(a_bits), None)
+                .expect("failed to find prefix");
+            let expected_bytes = a_bits / 8;
             let expected_bits = a_bits % 8;
             assert!(diff.prefix.is_some());
             assert_eq!(diff.pos.index, expected_bytes);

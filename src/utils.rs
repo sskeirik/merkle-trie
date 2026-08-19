@@ -6,17 +6,20 @@
 //! crate is compiled.
 
 #[cfg(not(feature = "std_allocator_api"))]
-pub use allocator_api2::{boxed::Box, alloc::{Allocator, Global}};
-#[cfg(feature = "std_allocator_api")]
-pub use std::{boxed::Box, alloc::Allocator};
+pub use allocator_api2::{
+    alloc::{Allocator, Global},
+    boxed::Box,
+};
 use std::fmt::Write;
+#[cfg(feature = "std_allocator_api")]
+pub use std::{alloc::Allocator, boxed::Box};
 
 /// A shared reference to an [`Option`] that must be non-`None`
-pub struct NonNone<'a,T>(&'a Option<T>);
-impl<'a,T> NonNone<'a,T> {
+pub struct NonNone<'a, T>(&'a Option<T>);
+impl<'a, T> NonNone<'a, T> {
     pub fn new(opt: &'a Option<T>) -> Option<Self> {
         if opt.is_none() {
-            return None
+            return None;
         }
         Some(Self(opt))
     }
@@ -35,11 +38,11 @@ impl<'a,T> NonNone<'a,T> {
 }
 
 /// A mutable reference to an [`Option`] that must be non-`None`
-pub struct NonNoneMut<'a,T>(&'a mut Option<T>);
-impl<'a,T> NonNoneMut<'a,T> {
+pub struct NonNoneMut<'a, T>(&'a mut Option<T>);
+impl<'a, T> NonNoneMut<'a, T> {
     pub fn new(opt: &'a mut Option<T>) -> Option<Self> {
         if opt.is_none() {
-            return None
+            return None;
         }
         Some(Self(opt))
     }
@@ -74,23 +77,26 @@ impl<'a,T> NonNoneMut<'a,T> {
 /// Given a mutable input slice and a list of `indices`, return a vector of mutable references for each indexed element
 ///
 /// # SAFETY
-/// 
+///
 /// Caller must ensure that each index in the `indices` array is in-bounds for the input slice and that it contains no duplicates.
 pub unsafe fn pick_mut_unchecked<'a, T>(arr: &'a mut [T], indices: &[usize]) -> Vec<&'a mut T> {
     let ptr = arr.as_mut_ptr();
     // SAFETY: by assumption
-    indices.iter().map(|&i| unsafe { &mut *ptr.add(i) }).collect()
+    indices
+        .iter()
+        .map(|&i| unsafe { &mut *ptr.add(i) })
+        .collect()
 }
 
 /// Given an input slice and a list of `indices`, return a vector of mutable references for each indexed element
 ///
 /// # SAFETY
-/// 
+///
 /// Caller must ensure that each index in the `indices` array is in-bounds for the input slice and that it contains no duplicates.
 pub unsafe fn pick_unchecked<'a, T>(arr: &'a [T], indices: &[usize]) -> Vec<&'a T> {
     let ptr = arr.as_ptr();
     // SAFETY: by assumption
-    indices.iter().map(|&i| unsafe { & *ptr.add(i) }).collect()
+    indices.iter().map(|&i| unsafe { &*ptr.add(i) }).collect()
 }
 
 /// Given a byte slice and an allocator, create a new allocator-owned copy of that slice
@@ -98,23 +104,20 @@ pub fn copy_slice_into_box<A: Allocator>(src: &[u8], alloc: A) -> Box<[u8], A> {
     let mut boxed = Box::new_uninit_slice_in(src.len(), alloc);
     // SAFETY: we immediately initialize all elements by copying from src
     unsafe {
-        std::ptr::copy_nonoverlapping(
-            src.as_ptr(),
-            boxed.as_mut_ptr() as *mut u8,
-            src.len(),
-        );
+        std::ptr::copy_nonoverlapping(src.as_ptr(), boxed.as_mut_ptr() as *mut u8, src.len());
         boxed.assume_init()
     }
 }
 
 /// Print a byte string as ASCII characters
-/// 
+///
 /// Non-printable characters are represented via hexadecimal escapes.
 pub fn to_ascii(bytes: &[u8]) -> String {
-    bytes.iter()
-         .flat_map(|&b| std::ascii::escape_default(b))
-         .map(|c| c as char)
-         .collect()
+    bytes
+        .iter()
+        .flat_map(|&b| std::ascii::escape_default(b))
+        .map(|c| c as char)
+        .collect()
 }
 
 /// Print a byte string as hexadecimal pairs

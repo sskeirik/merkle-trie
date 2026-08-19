@@ -1,12 +1,12 @@
 //! Merkle [`Trie`] type and its public API.
 
-use std::fmt::Debug;
+use crate::digestible::Digestible;
+use crate::node::mode::*;
+use crate::node::{Node, NodeLink, TrieMode};
+use crate::utils::{Allocator, Box, copy_slice_into_box};
 use allocator_api2::alloc::Global;
 use digest::{Digest, Output};
-use crate::digestible::Digestible;
-use crate::node::{TrieMode, Node, NodeLink};
-use crate::node::mode::*;
-use crate::utils::{Allocator, Box, copy_slice_into_box};
+use std::fmt::Debug;
 
 /// Errors that can occur while performing [`Trie`] operations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -78,7 +78,7 @@ pub trait NodeUpdate<T> {
 /// Implements [`NodeUpdate`] by upserting [`Self::value`].
 pub(super) struct NodeUpsert<T> {
     /// The value to be upserted.
-    pub value: T
+    pub value: T,
 }
 
 /// Updates a node's value by upsertion of the stored value.
@@ -109,31 +109,48 @@ impl<T> NodeUpdate<T> for NodeUpsert<T> {
 ///
 /// If `T` also implements [`Debug`]/[`Clone`], then [`Trie`] will implements [`Debug`]/[`Clone`].
 #[derive(Clone)]
-pub struct Trie<T: Digestible, const N: usize, const K: usize, H: Digest, A: Allocator + Clone, M: TrieMode>(pub(super) A, pub(super) NodeLink<T,N,K,H,A,M>);
+pub struct Trie<
+    T: Digestible,
+    const N: usize,
+    const K: usize,
+    H: Digest,
+    A: Allocator + Clone,
+    M: TrieMode,
+>(pub(super) A, pub(super) NodeLink<T, N, K, H, A, M>);
 
-impl<T: Digestible, const N: usize, const K: usize, H: Digest> Trie<T,N,K,H,Global,Complete> {
+impl<T: Digestible, const N: usize, const K: usize, H: Digest> Trie<T, N, K, H, Global, Complete> {
     /// Create a new compressed Merkle trie using the global allocator
     pub fn new() -> Self {
         Self::new_in(Global)
     }
 }
 
-impl<T: Digestible + PartialEq + Eq, const N: usize, const K: usize, H: Digest> Default for Trie<T,N,K,H,Global,Complete> {
+impl<T: Digestible + PartialEq + Eq, const N: usize, const K: usize, H: Digest> Default
+    for Trie<T, N, K, H, Global, Complete>
+{
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<T: Digestible, const N: usize, const K: usize, A: Allocator + Clone, H: Digest> Trie<T,N,K,H,A,Complete> {
+impl<T: Digestible, const N: usize, const K: usize, A: Allocator + Clone, H: Digest>
+    Trie<T, N, K, H, A, Complete>
+{
     /// Create a new compressed Merkle trie using the given allocator
     pub fn new_in(alloc: A) -> Self {
         Trie(alloc, NodeLink(None))
     }
 }
 
-impl<T: Digestible, const N: usize, const K: usize, H:Digest, A: Allocator + Clone, M: TrieMode> Trie<T,N,K,H,A,M> {
+impl<T: Digestible, const N: usize, const K: usize, H: Digest, A: Allocator + Clone, M: TrieMode>
+    Trie<T, N, K, H, A, M>
+{
     /// Set the value of target_key in the trie
-    pub fn update<U: NodeUpdate<T>>(&mut self, target_key: &[u8], updater: U) -> Result<(), TrieError> {
+    pub fn update<U: NodeUpdate<T>>(
+        &mut self,
+        target_key: &[u8],
+        updater: U,
+    ) -> Result<(), TrieError> {
         Self::check_key(target_key)?;
         let alloc = &self.0;
         // unlike other top-level functions, we need to ensure that case EmptySlot
@@ -197,25 +214,30 @@ impl<T: Digestible, const N: usize, const K: usize, H:Digest, A: Allocator + Clo
     }
 }
 
-impl<T: Digestible, const N: usize, const K: usize, A: Allocator + Clone, H: Digest> Trie<T,N,K,H,A,Complete> {
+impl<T: Digestible, const N: usize, const K: usize, A: Allocator + Clone, H: Digest>
+    Trie<T, N, K, H, A, Complete>
+{
     /// Convert a concrete trie to a partial trie
     #[must_use]
-    pub fn to_partial(self) -> Trie<T,N,K,H,A,Partial> {
-        Trie::<T,N,K,H,A,Partial>(self.0, self.1.into_partial())
+    pub fn to_partial(self) -> Trie<T, N, K, H, A, Partial> {
+        Trie::<T, N, K, H, A, Partial>(self.0, self.1.into_partial())
     }
 }
 
-
-impl<T: Digestible + Clone, const N: usize, const K: usize, A: Allocator + Clone, H: Digest> Trie<T,N,K,H,A,Complete> {
+impl<T: Digestible + Clone, const N: usize, const K: usize, A: Allocator + Clone, H: Digest>
+    Trie<T, N, K, H, A, Complete>
+{
     /// Given a complete, cloneable trie and a set of keys, build the minimal partial trie
     /// proves the non/existence of each key in the set in the trie
-    pub fn to_witness_for_keys(&self, keys: Vec<&[u8]>) -> Trie<T,N,K,H,A,Partial> {
+    pub fn to_witness_for_keys(&self, keys: Vec<&[u8]>) -> Trie<T, N, K, H, A, Partial> {
         let witness_root = self.1.to_witness_for_keys(keys, self.0.clone());
         Trie(self.0.clone(), witness_root)
     }
 }
 
-impl<T: Digestible, const N: usize, const K: usize, A: Allocator + Clone, H: Digest> Trie<T,N,K,H,A,Partial> {
+impl<T: Digestible, const N: usize, const K: usize, A: Allocator + Clone, H: Digest>
+    Trie<T, N, K, H, A, Partial>
+{
     /// Given a partial trie and a set of keys, update this trie in-place to obtain a minimal partial trie that
     /// proves the non/existence of each key in the set in the trie
     pub fn prune_for_keys(&mut self, keys: Vec<&[u8]>) {
@@ -224,21 +246,39 @@ impl<T: Digestible, const N: usize, const K: usize, A: Allocator + Clone, H: Dig
 }
 
 /// Trie equality is just equality of its node structure
-impl<T: Digestible + PartialEq + Eq, const N: usize, const K: usize, H: Digest, A: Allocator + Clone, M: TrieMode> PartialEq for Trie<T,N,K,H,A,M> {
+impl<
+    T: Digestible + PartialEq + Eq,
+    const N: usize,
+    const K: usize,
+    H: Digest,
+    A: Allocator + Clone,
+    M: TrieMode,
+> PartialEq for Trie<T, N, K, H, A, M>
+{
     fn eq(&self, other: &Self) -> bool {
         self.1 == other.1
     }
 }
 
 /// The debug format of a Merkle trie is a nested presentation of the trie structure
-impl<T: Digestible + Debug, const N: usize, const K: usize, H:Digest, A: Allocator + Clone, M: TrieMode> Debug for Trie<T,N,K,H,A,M> {
+impl<
+    T: Digestible + Debug,
+    const N: usize,
+    const K: usize,
+    H: Digest,
+    A: Allocator + Clone,
+    M: TrieMode,
+> Debug for Trie<T, N, K, H, A, M>
+{
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        self.1.debug_fmt( 0, None, f)
+        self.1.debug_fmt(0, None, f)
     }
 }
 
 /// The digest of a Merkle trie is just the digest of its root hash
-impl<T: Digestible, const N: usize, const K: usize, H:Digest, A: Allocator + Clone, M: TrieMode> Digestible for Trie<T,N,K,H,A,M> {
+impl<T: Digestible, const N: usize, const K: usize, H: Digest, A: Allocator + Clone, M: TrieMode>
+    Digestible for Trie<T, N, K, H, A, M>
+{
     fn update_hasher<D: Digest>(&self, hasher: &mut D) {
         hasher.update(self.digest());
     }
