@@ -108,7 +108,9 @@ impl<T> NodeUpdate<T> for NodeUpsert<T> {
 ///
 /// For dense tries, higher branching factors can reduce size overhead.
 ///
-/// If `T` also implements [`Debug`]/[`Clone`], then [`Trie`] will implements [`Debug`]/[`Clone`].
+/// [`Trie`] always implements [`Debug`], eliding leaf values as `..`; use
+/// [`Trie::debug_with_values`] to print them instead (requires `T: Debug`).
+/// [`Trie`] implements [`Clone`] only if `T` does.
 #[derive(Clone)]
 pub struct Trie<
     T: Digestible,
@@ -298,9 +300,10 @@ impl<
     }
 }
 
-/// The debug format of a Merkle trie is a nested presentation of the trie structure
+/// The debug format of a Merkle trie is a nested presentation of the trie structure;
+/// leaf values are elided as `..` (see [`Trie::debug_with_values`] to print them).
 impl<
-    T: Digestible + Debug,
+    T: Digestible,
     const N: usize,
     const K: usize,
     H: Digest,
@@ -310,6 +313,49 @@ impl<
 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         self.1.debug_fmt(0, None, f)
+    }
+}
+
+/// Wrapper returned by [`Trie::debug_with_values`].
+struct DebugWithValues<
+    'a,
+    T: Digestible,
+    const N: usize,
+    const K: usize,
+    H: Digest,
+    A: Allocator + Clone,
+    M: TrieMode,
+>(&'a Trie<T, N, K, H, A, M>);
+
+impl<
+    'a,
+    T: Digestible + Debug,
+    const N: usize,
+    const K: usize,
+    H: Digest,
+    A: Allocator + Clone,
+    M: TrieMode,
+> Debug for DebugWithValues<'a, T, N, K, H, A, M>
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.1.debug_fmt_verbose(0, None, f)
+    }
+}
+
+impl<
+    T: Digestible + Debug,
+    const N: usize,
+    const K: usize,
+    H: Digest,
+    A: Allocator + Clone,
+    M: TrieMode,
+> Trie<T, N, K, H, A, M>
+{
+    /// Returns a [`Debug`]-formattable view of this trie that prints each leaf's
+    /// actual value via `T`'s [`Debug`] impl, unlike `{:?}` on [`Trie`] itself (which
+    /// elides leaf values as `..` but works for any `T`).
+    pub fn debug_with_values(&self) -> impl Debug + '_ {
+        DebugWithValues(self)
     }
 }
 

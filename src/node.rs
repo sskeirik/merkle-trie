@@ -1051,12 +1051,29 @@ impl<
     M: TrieMode,
 > NodeLink<T, N, K, H, A, M>
 {
-    /// This function drives the [`Debug`] implementation for [`Trie`].
+    /// This function drives the [`Debug`] implementation for [`Trie`]. Leaf values are
+    /// always elided as `..`; see [`Self::debug_fmt_verbose`] to print them when `T: Debug`.
     pub(super) fn debug_fmt(
         &self,
         depth: usize,
         child_num: Option<usize>,
         f: &mut std::fmt::Formatter<'_>,
+    ) -> std::fmt::Result {
+        self.debug_fmt_impl(depth, child_num, f, &|_, f| write!(f, ".."))
+    }
+
+    /// Shared implementation behind [`Self::debug_fmt`] and [`Self::debug_fmt_verbose`].
+    ///
+    /// `T` is not required to be [`Debug`] here: how a leaf's value is printed is
+    /// entirely decided by the caller-supplied `value_fmt`, which is where the `T:
+    /// Debug` bound (when needed) actually lives. This sidesteps the fact that Rust
+    /// cannot directly write trait bounds generic over whether `T: Debug` holds.
+    fn debug_fmt_impl(
+        &self,
+        depth: usize,
+        child_num: Option<usize>,
+        f: &mut std::fmt::Formatter<'_>,
+        value_fmt: &dyn Fn(&T, &mut std::fmt::Formatter<'_>) -> std::fmt::Result,
     ) -> std::fmt::Result {
         let space = " ".repeat(depth * 2);
         write!(f, "{}", space)?;
@@ -1065,7 +1082,7 @@ impl<
         }
         if let Some((hash, node)) = self.0.as_ref() {
             write!(f, "{} -> ", HashFrag::<H>(hash))?;
-            Node::debug_fmt(node, depth, f)
+            Node::debug_fmt_impl(node, depth, f, value_fmt)
         } else {
             if depth == 0 {
                 write!(f, "Trie(Empty)")
@@ -1077,6 +1094,27 @@ impl<
 }
 
 impl<
+    T: Digestible + Debug,
+    const N: usize,
+    const K: usize,
+    H: Digest,
+    A: Allocator + Clone,
+    M: TrieMode,
+> NodeLink<T, N, K, H, A, M>
+{
+    /// Like [`Self::debug_fmt`], but prints each leaf's actual value via `T`'s
+    /// [`Debug`] impl instead of eliding it. Drives [`Trie::debug_with_values`].
+    pub(super) fn debug_fmt_verbose(
+        &self,
+        depth: usize,
+        child_num: Option<usize>,
+        f: &mut std::fmt::Formatter<'_>,
+    ) -> std::fmt::Result {
+        self.debug_fmt_impl(depth, child_num, f, &|value, f| write!(f, "{:?}", value))
+    }
+}
+
+impl<
     T: Digestible,
     const N: usize,
     const K: usize,
@@ -1084,15 +1122,28 @@ impl<
     A: Allocator + Clone,
     M: TrieMode,
 > Node<T, N, K, H, A, M> {
+    /// See [`NodeLink::debug_fmt`].
     pub(super) fn debug_fmt(
         &self,
         depth: usize,
         f: &mut std::fmt::Formatter<'_>,
     ) -> std::fmt::Result {
+        self.debug_fmt_impl(depth, f, &|_, f| write!(f, ".."))
+    }
+
+    /// See [`NodeLink::debug_fmt_impl`].
+    fn debug_fmt_impl(
+        &self,
+        depth: usize,
+        f: &mut std::fmt::Formatter<'_>,
+        value_fmt: &dyn Fn(&T, &mut std::fmt::Formatter<'_>) -> std::fmt::Result,
+    ) -> std::fmt::Result {
         let space = " ".repeat(depth * 2);
         match &self.kind {
-            Kind::Leaf { .. } => {
-                write!(f, "L({}, ..)", to_bin::<false>(&self.key))
+            Kind::Leaf { value, .. } => {
+                write!(f, "L({}, ", to_bin::<false>(&self.key))?;
+                value_fmt(value, f)?;
+                write!(f, ")")
             }
             Kind::Branch { mask, children, .. } => {
                 write!(
@@ -1103,7 +1154,7 @@ impl<
                 )?;
                 for (idx, child) in children.iter().enumerate() {
                     writeln!(f)?;
-                    NodeLink::debug_fmt(child, depth + 1, Some(idx), f)?;
+                    NodeLink::debug_fmt_impl(child, depth + 1, Some(idx), f, value_fmt)?;
                 }
                 write!(f, "\n{})", space)
             }
