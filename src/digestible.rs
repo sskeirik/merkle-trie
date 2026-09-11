@@ -57,3 +57,38 @@ impl Digestible for W<bool> {
         W(self.0 as u8).update_hasher(hasher);
     }
 }
+
+/// A hash value that can stand in as a [`Trie`](crate::Trie) leaf value.
+///
+/// Wraps a hash [`Output`] so that a leaf's value can be represented by its
+/// digest alone rather than by the original value, without requiring the
+/// original value type to be `Clone` (or otherwise reconstructible). This is
+/// used by [`Trie::to_hash_witness_for_keys`](crate::Trie::to_hash_witness_for_keys)
+/// to build witnesses over tries whose values are not [`Clone`].
+pub struct HashWitnessValue<H: Digest>(pub Output<H>);
+
+impl<H: Digest> Clone for HashWitnessValue<H> {
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
+}
+
+impl<H: Digest> PartialEq for HashWitnessValue<H> {
+    fn eq(&self, other: &Self) -> bool {
+        self.0 == other.0
+    }
+}
+
+impl<H: Digest> Eq for HashWitnessValue<H> {}
+
+impl<H: Digest> std::fmt::Debug for HashWitnessValue<H> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", HashFrag::<H>(&self.0))
+    }
+}
+
+impl<H: Digest> Digestible for HashWitnessValue<H> {
+    fn update_hasher<D: Digest>(&self, hasher: &mut D) {
+        hasher.update(self.0.as_slice())
+    }
+}

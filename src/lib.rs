@@ -9,6 +9,6 @@ pub mod utils;
 
 // Public re-exports
 pub use digest::Digest;
-pub use digestible::Digestible;
+pub use digestible::{Digestible, HashWitnessValue};
 pub use node::{Complete, Partial, TrieMode};
 pub use trie::{NodeUpdate, Trie, TrieError};

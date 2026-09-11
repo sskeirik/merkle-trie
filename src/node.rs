@@ -1,12 +1,13 @@
 //! Internal Merkle [`Trie`] node representation and algorithms.
 
 use crate::bitseqops::{BitDiff, BitPosition, BitSeqOps, find_first_distinct_bits};
-use crate::digestible::{Digestible, HashFrag, empty_hash};
+use crate::digestible::{Digestible, HashFrag, HashWitnessValue, empty_hash};
 use crate::trie::{NodeUpdate, TrieError};
 use crate::utils::{Allocator, Box, NonNone, NonNoneMut, pick_mut_unchecked, pick_unchecked};
 use digest::{Digest, Output};
 use std::collections::HashMap;
 use std::fmt::Debug;
+use std::marker::PhantomData;
 #[allow(unused_imports)] // debugging or doc-comments
 use {
     crate::trie::Trie,
@@ -946,7 +947,7 @@ impl<
 impl<T: Digestible + Clone, const N: usize, const K: usize, A: Allocator + Clone, H: Digest>
     NodeLink<T, N, K, H, A, Complete>
 {
-    /// The internal implementation of [`Trie::witness_for_keys`]
+    /// The internal implementation of [`Trie::to_witness_for_keys`]
     pub fn to_witness_for_keys(
         &self,
         keys: Vec<&[u8]>,
@@ -972,6 +973,105 @@ impl<T: Digestible + Clone, const N: usize, const K: usize, A: Allocator + Clone
             }
             Opaque(_, tag) => match tag {},
         };
+        NodeLink(Some((hash.clone(), node))).into_partial()
+    }
+}
+
+/// A view of [`Complete`] Trie node paired with a [`Partial`] clone of itself
+/// where trie values are represented by their hashes; can build an approximate
+/// witness from a non-[`Clone`]able Trie by representing to-be-cloned values
+/// by their digest
+struct HashWitnessBuilder<
+    'src,
+    'tgt,
+    T: Digestible,
+    const N: usize,
+    const K: usize,
+    H: Digest,
+    A: Allocator + Clone,
+>(
+    &'src NodeLink<T, N, K, H, A, Complete>,
+    &'tgt mut NodeLink<HashWitnessValue<H>, N, K, H, A, Partial>,
+    A,
+);
+
+impl<
+    'src,
+    'tgt,
+    T: Digestible,
+    const N: usize,
+    const K: usize,
+    H: Digest,
+    A: Allocator + Clone,
+> TrieFrontierCursor<T, N, K, H, A> for HashWitnessBuilder<'src, 'tgt, T, N, K, H, A>
+{
+    fn source(&self) -> &NodeLink<T, N, K, H, A, Partial> {
+        // SAFETY: NodeLink<..., Complete> and NodeLink<..., Partial> are
+        // layout-identical (see the SAFETY comment on `NodeLink::into_partial`),
+        // so a `&NodeLink<Complete>` may be reinterpreted as `&NodeLink<Partial>`
+        // for read-only access.
+        unsafe { std::mem::transmute(self.0) }
+    }
+
+    unsafe fn process_child(&mut self, idx: usize, found: bool) {
+        let src_children = unsafe { self.0.0.as_ref().unwrap_unchecked().1.as_children() };
+        let tgt_children = unsafe { self.1.0.as_mut().unwrap_unchecked().1.as_children_mut() };
+        if found {
+            tgt_children[idx] = src_children[idx].clone_as_hash_leaf();
+        } else {
+            if let Some(NodeLink(Some((hash, child)))) = src_children.get(idx) {
+                let node = Node {
+                    key: child.key.clone(),
+                    kind: Kind::Opaque(hash.clone(), ()),
+                };
+                tgt_children[idx] =
+                    NodeLink(Some((hash.clone(), Box::new_in(node, self.2.clone()))));
+            }
+        }
+    }
+
+    unsafe fn into_children(self, indices: &[usize]) -> Vec<Self> {
+        let src_children = unsafe { self.0.0.as_ref().unwrap_unchecked().1.as_children() };
+        let tgt_children = unsafe { self.1.0.as_mut().unwrap_unchecked().1.as_children_mut() };
+
+        let sel_src_children: Vec<_> = unsafe { pick_unchecked(src_children, indices) };
+        let sel_tgt_children: Vec<_> = unsafe { pick_mut_unchecked(tgt_children, indices) };
+
+        sel_src_children
+            .into_iter()
+            .zip(sel_tgt_children)
+            .map(|(src, tgt)| Self(src, tgt, self.2.clone()))
+            .collect()
+    }
+}
+
+impl<T: Digestible, const N: usize, const K: usize, A: Allocator + Clone, H: Digest> NodeLink<T, N, K, H, A, Complete>
+{
+    /// The internal implementation of [`Trie::to_hash_witness_for_keys`]
+    pub fn to_hash_witness_for_keys(
+        &self,
+        keys: Vec<&[u8]>,
+        alloc: A,
+    ) -> NodeLink<HashWitnessValue<H>, N, K, H, A, Partial> {
+        let mut new_root = self.clone_as_hash_leaf();
+        let builder = HashWitnessBuilder(self, &mut new_root, alloc);
+        to_witness_for_keys_generic(builder, keys);
+        new_root
+    }
+
+    fn clone_as_hash_leaf(&self) -> NodeLink<HashWitnessValue<H>, N, K, H, A, Partial> {
+        use Kind::*;
+        let NodeLink(Some((hash, node))) = self else {
+            return NodeLink(None);
+        };
+        let kind: Kind<HashWitnessValue<H>, N, K, H, A, Complete> = match node.kind {
+            Leaf { .. } => Leaf { value: HashWitnessValue(node.digest()), _phantom: PhantomData },
+            Branch { mask, .. } => Branch { mask, children: [const { NodeLink(None) }; K] },
+            Opaque(_, tag) => match tag {},
+        };
+        let node_copy = Node { key: node.key.clone(), kind };
+        let node: Box<Node<HashWitnessValue<H>, N, K, H, A, Complete>, A> =
+            Box::new_in(node_copy, Box::allocator(node).clone());
         NodeLink(Some((hash.clone(), node))).into_partial()
     }
 }

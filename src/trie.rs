@@ -1,8 +1,8 @@
 //! Merkle [`Trie`] type and its public API.
 
 use crate::digestible::Digestible;
-use crate::node::mode::*;
-use crate::node::{Node, NodeLink, TrieMode};
+use crate::digestible::HashWitnessValue;
+use crate::node::{Node, NodeLink, TrieMode, Complete, Partial};
 use crate::utils::{Allocator, Box, copy_slice_into_box};
 use allocator_api2::alloc::Global;
 use digest::{Digest, Output};
@@ -261,6 +261,14 @@ impl<T: Digestible, const N: usize, const K: usize, A: Allocator + Clone, H: Dig
     #[must_use]
     pub fn to_partial(self) -> Trie<T, N, K, H, A, Partial> {
         Trie::<T, N, K, H, A, Partial>(self.0, self.1.into_partial())
+    }
+
+    /// Given a complete trie and a set of keys, build the minimal partial trie that
+    /// proves the non/existence of each key in the set in the trie, representing
+    /// values outside the witness by their digest rather than requiring `T: Clone`.
+    pub fn to_hash_witness_for_keys(&self, keys: Vec<&[u8]>) -> Trie<HashWitnessValue<H>, N, K, H, A, Partial> {
+        let witness_root = self.1.to_hash_witness_for_keys(keys, self.0.clone());
+        Trie(self.0.clone(), witness_root)
     }
 }
 
