@@ -55,7 +55,9 @@ Expanding upon the summary sentence in more detail, we have:
 
    For dense tries, higher branching factors can reduce size overhead.
 
-   If `T` also implements [`Debug`]/[`Clone`], then [`Trie`] implements [`Debug`]/[`Clone`].
+   If `T` also implements [`Clone`], then [`Trie`] implements [`Clone`].
+   Note that [`Trie`] has a fallback [`Debug`] implementation which is active whenever `T: !Debug`;
+   however, a specialized [`Debug`] implementation is available when `T: Debug`.
 
 ## Limitations
 
