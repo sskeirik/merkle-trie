@@ -222,7 +222,7 @@ impl<T: Digestible, const N: usize, const K: usize, H: Digest, A: Allocator + Cl
             &node.key,
             pos.bits,
             None,
-            Some(node.get_key_bits()),
+            Some(node.get_key_bits().saturating_sub(pos.bits)),
         ) else {
             debug!("For {}, exact match found at node {}", to_ascii(key), label);
             return action(pos, ProbeResult::ExactMatch(opt_ref));
@@ -230,16 +230,22 @@ impl<T: Digestible, const N: usize, const K: usize, H: Digest, A: Allocator + Cl
 
         match (&node.kind, split.prefix) {
             (Kind::Branch { children, .. }, Some(1)) => {
-                let slot = split.mask_value::<K>(key);
+                // `split.pos` is relative to `&key[pos.index..]`; make it absolute
+                // (relative to `key` itself) before using it against the full key.
+                let global_pos = BitPosition {
+                    index: pos.index + split.pos.index,
+                    bits: split.pos.bits,
+                };
+                let slot = BitSeqOps::<K>::mask_value(key, global_pos.index, global_pos.bits);
                 match bound {
                     Some(0) => {
                         debug!("For {}, search bound hit at node {}", to_ascii(key), label);
-                        return action(pos, ProbeResult::Bounded(opt_ref, split.pos, slot));
+                        return action(pos, ProbeResult::Bounded(opt_ref, global_pos.increment::<K>(), slot));
                     }
                     Some(ref mut n) => *n -= 1,
                     _ => {}
                 };
-                let next_pos = split.pos.increment::<K>();
+                let next_pos = global_pos.increment::<K>();
                 debug!("Recursing into {slot} with pos {:?}", next_pos);
                 children[slot].probe(bound, key, next_pos, action)
             }
@@ -289,7 +295,7 @@ impl<T: Digestible, const N: usize, const K: usize, H: Digest, A: Allocator + Cl
             &node.key,
             pos.bits,
             None,
-            Some(node.get_key_bits()),
+            Some(node.get_key_bits().saturating_sub(pos.bits)),
         ) else {
             debug!("For {}, exact match found at node {}", to_ascii(key), label);
             return action(pos, ProbeResult::ExactMatch(opt_mut));
@@ -297,17 +303,23 @@ impl<T: Digestible, const N: usize, const K: usize, H: Digest, A: Allocator + Cl
 
         let (result, merge_data) = match (&mut node.kind, split.prefix) {
             (Kind::Branch { children, mask }, Some(1)) => {
-                let slot = split.mask_value::<K>(key);
+                // `split.pos` is relative to `&key[pos.index..]`; make it absolute
+                // (relative to `key` itself) before using it against the full key.
+                let global_pos = BitPosition {
+                    index: pos.index + split.pos.index,
+                    bits: split.pos.bits,
+                };
+                let slot = BitSeqOps::<K>::mask_value(key, global_pos.index, global_pos.bits);
                 match bound {
                     Some(0) => {
                         debug!("For {}, search bound hit at node {}", to_ascii(key), label);
-                        return action(pos, ProbeResult::Bounded(opt_mut, split.pos, slot));
+                        return action(pos, ProbeResult::Bounded(opt_mut, global_pos.increment::<K>(), slot));
                     }
                     Some(ref mut n) => *n -= 1,
                     _ => {}
                 };
                 let child = &mut children[slot];
-                let next_pos = split.pos.increment::<K>();
+                let next_pos = global_pos.increment::<K>();
                 debug!("Recursing into {slot} with pos {:?}", next_pos);
                 // perform post-deletion cleanup, if necessary
                 let pre_full = child.0.is_some();
@@ -407,9 +419,13 @@ impl<T: Digestible, const N: usize, const K: usize, H: Digest, A: Allocator + Cl
                         split.write_prefix::<K, A>(&existing_node.key, alloc.clone());
                     let new_existing_key =
                         split.write_suffix::<K, A>(&existing_node.key, alloc.clone());
-                    let inserted_leaf_key = split.write_suffix::<K, A>(target_key, alloc.clone());
+                    // `split.pos` is relative to `&target_key[pos.index..]` (the slice
+                    // that was actually compared against `existing_node.key`), so the
+                    // same slice (not the full `target_key`!) must be used here.
+                    let inserted_leaf_key =
+                        split.write_suffix::<K, A>(&target_key[pos.index..], alloc.clone());
                     let new_existing_slot = split.mask_value::<K>(&existing_node.key);
-                    let inserted_leaf_slot = split.mask_value::<K>(target_key);
+                    let inserted_leaf_slot = split.mask_value::<K>(&target_key[pos.index..]);
                     // evict existing, install new branch
                     let new_branch = Node::new_branch(new_branch_key, split.mask::<K>());
                     let mut evicted = std::mem::replace(&mut **existing_node, new_branch);

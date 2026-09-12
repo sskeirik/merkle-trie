@@ -108,28 +108,43 @@ pub fn find_first_distinct_bits(
 
     // if needed, check offset, increment start byte
     let offset_bits = offset % 8;
+    // number of wanted bits consumed by the (possibly partial) first byte,
+    // handled below; 0 if `offset` is already byte-aligned
+    let mut consumed_bits = 0;
     if offset_bits != 0 {
-        let isolate_suffix = !((1 << offset_bits) - 1);
+        // only the bits in [offset_bits, offset_bits + bits_here) are actually
+        // wanted; bits beyond `wanted_bits` (e.g. reserved for a Branch's mask,
+        // or otherwise outside the declared length) may not be meaningful and
+        // must not be compared, even though they still live in this byte.
+        let bits_here = wanted_bits.min(8 - offset_bits);
+        let isolate_suffix = (((1u16 << bits_here) - 1) as u8) << offset_bits;
         let v = (a[i] ^ b[i]) & isolate_suffix;
         if v != 0 {
             return mkdiff(i, v.trailing_zeros() as usize % 8, None);
         }
-        // if we need to read more bits, advance; otherwise, they are equal
-        if offset + wanted_bits > 8 {
+        if bits_here < wanted_bits {
+            // more wanted bits remain beyond this byte; keep comparing from the next one
             i += 1;
+            consumed_bits = bits_here;
         } else {
-            return None;
+            // all wanted bits matched; if lengths differ, the extra bits are "different"
+            return if a_bits != b_bits {
+                mkdiff(i, (offset + wanted_bits) % 8, Some((a_bits > b_bits) as usize))
+            } else {
+                None
+            };
         }
     }
 
-    // get byte-aligned wanted bits and bytes
-    let aligned_wanted_bits = wanted_bits - offset_bits;
+    // get byte-aligned wanted bits and bytes remaining after the (possibly
+    // partial) first byte handled above
+    let aligned_wanted_bits = wanted_bits - consumed_bits;
     let aligned_wanted_bytes = aligned_wanted_bits / 8;
     let extra_bits = aligned_wanted_bits % 8;
     let isolate_extra_bits: u8 = (1 << extra_bits) - 1;
 
     // get end byte
-    let n = aligned_wanted_bytes;
+    let n = i + aligned_wanted_bytes;
 
     tracing::debug!(
         "Splitting up to {n} bytes, {extra_bits} bits, from a:{}:{} and b:{}:{}",
