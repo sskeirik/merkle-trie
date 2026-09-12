@@ -1342,30 +1342,53 @@ mod witness_tests {
         println!("Witness: {t:?}");
     }
 
+    /// Regression test for a bug where inserting (or witnessing) a third key
+    /// that required a second, nested branch decision within a single byte
+    /// (e.g. `[1,2,3]`, `[1,2,4]`, `[1,2,5]` in a binary trie) would corrupt or
+    /// lose one of the existing keys, because the bit position returned by a
+    /// nested comparison was relative to the sliced key rather than absolute.
+    #[test]
+    fn nested_branch_keys_survive_insert_and_witness() {
+        let mut t: U64BinaryTrie = Trie::new();
+        let keys: &[&[u8]] = &[&[1, 2, 3], &[1, 2, 4], &[1, 2, 5], &[1, 2, 6], &[1, 2, 7]];
+        for (i, key) in keys.iter().enumerate() {
+            t.set(key, W(i as u64)).unwrap();
+        }
+        for (i, key) in keys.iter().enumerate() {
+            assert_eq!(t.get(key), Ok(Some(&W(i as u64))), "key {key:?} lost after insert");
+        }
+
+        let all_keys = keys.to_vec();
+        let expected = vec![Some(true); keys.len()];
+        let clone_witness = t.to_witness_for_keys(all_keys.clone());
+        assert!(clone_witness.verify_keys(&all_keys, &expected));
+        let hash_witness = t.to_hash_witness_for_keys(all_keys.clone());
+        assert!(hash_witness.verify_keys(&all_keys, &expected));
+    }
+
     #[derive(Clone, Debug)]
-    struct MyCustomData(u64);
-    impl Digestible for MyCustomData {
+    struct Data(u64);
+    impl Digestible for Data {
         fn update_hasher<D: Digest>(&self, hasher: &mut D) {
             hasher.update(&self.0.to_le_bytes())
         }
     }
 
-    type MyTrie = Trie<MyCustomData, 4, 2, Sha256, Global, Complete>;
+    type MyTrie = Trie<Data, 4, 2, Sha256, Global, Complete>;
 
+    /// Mirrors the first `## Example Code` block in the README; kept in sync
+    /// with it so the example can be debugged as a normal test.
     #[test]
-    fn misc_test() {
+    fn readme_example() {
         let mut t: MyTrie = Trie::new();
-        t.set(&[1, 2, 3], MyCustomData(45)).expect("trie set error");
-        t.set(&[1, 2, 5], MyCustomData(127))
-            .expect("trie set error");
-        println!("Original trie: {t:?}");
-        t.set(&[1, 2, 4], MyCustomData(78)).expect("trie set error");
+        t.set(&[1, 2, 3], Data(45)).unwrap();
+        t.set(&[1, 2, 4], Data(78)).unwrap();
+        t.set(&[1, 2, 5], Data(127)).unwrap();
         let delete_result = t.delete(&[1, 2, 4]);
         match delete_result {
             Ok(v) => println!("Old value at key was {v:?}"),
             Err(e) => println!("Error {e} occurred"),
         };
-        println!("\n\n\nAfter delete trie: {t:?}\n\n\n");
         let get_result = t.get(&[1, 2, 3]);
         match get_result {
             Ok(v) => println!("Borrow a value: {v:?}"),
@@ -1377,12 +1400,62 @@ mod witness_tests {
         println!("Trie clone: {trie_clone:?}");
 
         // build witnesses
-        let mut witness1 = t.clone().to_partial();
-        witness1.prune_for_keys(vec![&[1,2]]);
+        // NOTE: these construction techniques require `T: Clone`
+        // as the witness tries may actually contain the underlying
+        // trie values on leaf nodes
+        let witness1 = t.to_witness_for_keys(vec![&[1, 2, 3]]);
         println!("Witness 1: {witness1:?}");
 
-        println!("TOWITNESSFORKEYS");
-        let witness2 = t.to_witness_for_keys(vec![&[1,2,3]]);
+        let mut witness2 = t.clone().to_partial();
+        witness2.prune_for_keys(vec![&[1, 2]]);
         println!("Witness 2: {witness2:?}");
+
+        // verify witnesses
+        // witness1:
+        // - key [1,2,3] is provably present
+        // - key [1,2,4] is provably absent (as lookup diverges before reaching the pruned subtrie)
+        // - key [1,2,5]'s presence/absence is unprovable
+        // provable from witness1 alone, so we don't assert anything about it here
+        let witness1_keys: Vec<&[u8]> = vec![&[1, 2, 3], &[1, 2, 4], &[1,2,5]];
+        let witness1_expected = vec![Some(true), Some(false), None];
+        assert_eq!(witness1.verify_keys(&witness1_keys, &witness1_expected), true);
+
+        // witness2:
+        // since all of the leaf nodes in the trie are obscured, only
+        // the search for key [1,2,4] has a provable absence
+        let keys: Vec<&[u8]> = vec![&[1, 2, 3], &[1, 2, 4], &[1, 2, 5]];
+        let expected = vec![None, Some(false), None];
+        assert_eq!(witness2.verify_keys(keys, expected), true);
+        println!("Final: {witness2:?}");
+    }
+
+    #[derive(Debug)]
+    struct NonCloneData(u64);
+    impl Digestible for NonCloneData {
+        fn update_hasher<D: Digest>(&self, hasher: &mut D) {
+            hasher.update(&self.0.to_le_bytes())
+        }
+    }
+
+    type NonCloneTrie = Trie<NonCloneData, 4, 2, Sha256, Global, Complete>;
+
+    /// Mirrors the second `## Example Code` block in the README (the
+    /// `to_hash_witness_for_keys` example); kept in sync with it so the
+    /// example can be debugged as a normal test.
+    #[test]
+    fn readme_hash_witness_example() {
+        let mut t: NonCloneTrie = Trie::new();
+        t.set(&[1, 2, 3], NonCloneData(45)).unwrap();
+        t.set(&[1, 2, 4], NonCloneData(78)).unwrap();
+        t.set(&[1, 2, 5], NonCloneData(127)).unwrap();
+
+        // `t.clone()` and `t.to_witness_for_keys(..)` would both fail to compile here,
+        // since `NonCloneData` does not implement `Clone`.
+        let keys: Vec<&[u8]> = vec![&[1, 2, 3], &[1, 2, 4], &[1, 2, 5]];
+        let witness = t.to_hash_witness_for_keys(keys.clone());
+        println!("Hash witness: {witness:?}");
+
+        let expected = vec![Some(true); keys.len()];
+        assert_eq!(witness.verify_keys(&keys, &expected), true);
     }
 }

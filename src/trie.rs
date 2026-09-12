@@ -190,20 +190,20 @@ impl<T: Digestible, const N: usize, const K: usize, H: Digest, A: Allocator + Cl
     /// return an iterator where each value is either:
     ///
     /// - `Err()` indicating an ill-formed input error,
-    /// - `Ok(None)` indicating key's presence was expected
-    /// - `Ok(Some((idx,true)))` indicating key's presence was unexpected,
-    /// - `Ok(Some((idx,false)))` indicating key's presence was unknown,
+    /// - `Ok(None)` indicating key's presence/absence was expected
+    /// - `Ok(Some((idx,true)))` indicating key's presence/absence was unexpected,
+    /// - `Ok(Some((idx,false)))` indicating key's presence/absence is unknown,
     /// 
     /// Note that the final case is only possible for [`Partial`] tries
     /// where some nodes have been pruned.
     pub fn verify_each_key<'a>(
         &'a self,
-        keys_and_expected: impl Iterator<Item = (&'a [u8], bool)> + 'a,
+        keys_and_expected: impl Iterator<Item = (&'a [u8], Option<bool>)> + 'a,
     ) -> impl Iterator<Item = Result<Option<bool>, TrieError>> + 'a {
         keys_and_expected.map(|(target_key, expected)| {
             Self::check_key(target_key)?;
             let found = self.1.verify(target_key);
-            if found != Some(expected) {
+            if found != expected {
                 Ok(Some(found.is_some()))
             } else {
                 Ok(None)
@@ -212,9 +212,12 @@ impl<T: Digestible, const N: usize, const K: usize, H: Digest, A: Allocator + Cl
     }
 
     /// Given a target keys vector and an expected presence vector,
-    /// return true iff each key's presence in the trie provably matches its expected presence;
+    /// return true iff each key's presence in the trie provably matches its expected presence, where:
+    /// - Some(false) - indicates a key's absence is expected
+    /// - Some(true)  - indicates a key's presence is expected
+    /// - None        - indicates a key's presence/absence is unprovable
     /// return false otherwise or if any key has an invalid length.
-    pub fn verify_keys<'a>(&self, target_keys: impl Borrow<Vec<&'a [u8]>>, expected: impl Borrow<Vec<bool>>) -> bool {
+    pub fn verify_keys<'a>(&self, target_keys: impl Borrow<Vec<&'a [u8]>>, expected: impl Borrow<Vec<Option<bool>>>) -> bool {
         let (target_keys,expected) = (target_keys.borrow(), expected.borrow());
         if target_keys.len() != expected.len() {
             return false

@@ -112,12 +112,44 @@ witness2.prune_for_keys(vec![&[1,2]]);
 println!("Witness 2: {witness2:?}");
 
 // verify witnesses
-// NOTE: the second call fails to verify because the trie was over-pruned
 let keys: Vec<&[u8]> = vec![&[1,2,3], &[1,2,4], &[1,2,5]];
-let expected = vec![true,false,false];
+let expected = vec![Some(true), Some(false), None];
 assert_eq!(witness1.verify_keys(&keys, &expected), true);
-println!("HERE");
-assert_eq!(witness2.verify_keys( keys,  expected), false);
+
+let expected = vec![None, Some(false), None];
+assert_eq!(witness2.verify_keys(keys, expected), true);
+```
+
+`to_witness_for_keys` and cloning the [`Trie`] itself both require `T: Clone`,
+since the resulting witness may actually retain the original leaf values. When
+`T` is not `Clone`, use `to_hash_witness_for_keys` instead: it builds a witness
+that represents any leaf value outside the witness by its digest rather than
+by cloning it.
+
+```rust
+use {merkle_trie::{Trie,Complete,Digest,Digestible,utils::Global}, sha2::Sha256};
+
+// note: no `Clone` impl/derive here
+#[derive(Debug)]
+struct NonCloneData(u64);
+impl Digestible for NonCloneData {
+    fn update_hasher<D: Digest>(&self, hasher: &mut D) { hasher.update(&self.0.to_le_bytes()) }
+}
+type NonCloneTrie = Trie<NonCloneData,4,2,Sha256,Global,Complete>;
+
+let mut t: NonCloneTrie = Trie::new();
+t.set(&[1,2,3], NonCloneData(45));
+t.set(&[1,2,4], NonCloneData(78));
+t.set(&[1,2,5], NonCloneData(127));
+
+// `t.clone()` and `t.to_witness_for_keys(..)` would both fail to compile here,
+// since `NonCloneData` does not implement `Clone`.
+let keys: Vec<&[u8]> = vec![&[1,2,3], &[1,2,4], &[1,2,5]];
+let witness = t.to_hash_witness_for_keys(keys.clone());
+println!("Hash witness: {witness:?}");
+
+let expected = vec![Some(true); keys.len()];
+assert_eq!(witness.verify_keys(&keys, &expected), true);
 ```
 
 But, calling `prune_for_keys` on a [`Complete`] Trie is a type-error:
