@@ -31,8 +31,9 @@ Expanding upon the summary sentence in more detail, we have:
 
    Applying this property recursively means that we can represent entrie sub-tries by their root hash,
    enabling a powerful form of _lossy_ compression where, when the contents of a particular sub-trie are
-   irrelevant for a given operation, we can replace that sub-trie by a stub containing just its root hash
-   (see [`Trie::witness_for_keys`]).
+   irrelevant for a given operation, we can replace that sub-trie by a stub containing just its root hash.
+   See [`Trie::to_witness_for_keys`], [`Trie::prune_for_keys`], [`Trie::to_hash_witness_for_keys`] for
+   different versions of this operations.
 
    Taken to the limit, if we only care about trie identity (i.e., _all_ stored is irrelevant), we can
    collapse the entire trie into just its root's digest and use that to peform equality checks
@@ -40,7 +41,7 @@ Expanding upon the summary sentence in more detail, we have:
 
    In particular, the [`TrieMode`] parameter ensures that this kind of lossy compression
    is _disabled by default_ and attempting to use is a _type error_; to enable it, call
-   [`Trie::to_parial`].
+   [`Trie::to_partial`].
 
 4. _Generic_ - The implementation exposes the following user-settable generic parameters:
 
@@ -64,6 +65,8 @@ Expanding upon the summary sentence in more detail, we have:
 For implementation simplicity:
 
 1. Values can only be set on true leaf nodes (setting values on intermediate nodes is unsupported).
+2. The use of [`Trie::hash_eq`] is not yet supported between a witness constructed via [`Trie::to_hash_witness_for_keys`]
+   and its source trie.
 
 ## Cargo Features
 
@@ -111,7 +114,12 @@ let mut witness2 = t.clone().to_partial();
 witness2.prune_for_keys(vec![&[1,2]]);
 println!("Witness 2: {witness2:?}");
 
-// verify witnesses
+// verify key presence/absence in the original trie
+// by examining the partial witness trie
+//
+// Some(true/false) - means the key is provably present/absent
+// None             - means the key's presence/absence is unknowable
+//
 let keys: Vec<&[u8]> = vec![&[1,2,3], &[1,2,4], &[1,2,5]];
 let expected = vec![Some(true), Some(false), None];
 assert_eq!(witness1.verify_keys(&keys, &expected), true);
@@ -152,7 +160,7 @@ let expected = vec![Some(true); keys.len()];
 assert_eq!(witness.verify_keys(&keys, &expected), true);
 ```
 
-But, calling `prune_for_keys` on a [`Complete`] Trie is a type-error:
+Also, calling `prune_for_keys` on a [`Complete`] Trie is a type-error:
 
 ```rust,compile_fail
 use {merkle_trie::{Trie,Complete,Digest,Digestible,utils::Global}, sha2::Sha256};
@@ -173,10 +181,19 @@ t.prune_for_keys(vec![&[1,2,3]]);
 
 ## Details
 
-Internally, we implement core trie operations `get`, `update`, and `delete` as thin wrappers around a pair of shared traversal
-routines, `probe` (read-only) and `probe_mut` (mutating).
+Internally, our core trie operations are thin wrappers around three core primitives:
 
-Each traversal routine walks the trie from the root, following the branch matching each key's bits, until it reaches either:
+| Primitive             | Description                                       | Core Operations                                                     |
+| ---                   | ---                                               | ---                                                                 |
+| `probe`               | traverses trie with an immutable cursor           | `get`, `verify`                                                     |
+| `probe_mut`           | traverses trie with a mutable cursor              | `update`, `delete`                                                  |
+| `mk_witness_for_keys` | traverses trie with an immutable multi-key cursor | `prune_for_keys`, `to_witness_for_keys`, `to_hash_witness_for_keys` |
+
+### Single-Key Operations
+
+Each single key core operation (`get`, `verify`, `update`, `delete`) wraps a single-key traversal routine `probe` or `probe_mut`.
+
+The traversal routine walks the trie from the root, following the branch matching each key's bits, until it reaches either:
 an exact match, an empty child slot, a bounded search limit, or a disagreeing bit between the target key and a stored node key
 (search for `ProbeResult` to see the details).
 
@@ -184,10 +201,22 @@ The core trie operations then just invoke the probe routine with an "action" clo
 that consumes the `ProbeResult` in order to perform its requested operation.
 
 This means the operation-specific logic (installing a new leaf/branch on `update`, removing a leaf on `delete`, returning a
-value reference on `get`) lives entirely inside the closure passed to `probe`/`probe_mut`, while the shared traversal
+value reference on `get`, etc...) lives entirely inside the closure passed to `probe`/`probe_mut`, while the shared traversal
 code stays agnostic to what the caller intends to do with the result.
 
 Finally, on the way back up the call-stack,`probe_mut` also re-hashes modified nodes and,
 where a branch has been reduced to a single child, compresses the branch-child pair,
 so callers only need to describe the change they want made at the point of divergence
 rather than managing digest recomputation or trie compression themselves.
+
+### Multi-Key Operations
+
+The multi-key operations (`prune_for_keys`, `to_witness_for_keys`, `to_hash_witness_for_keys`) wrap the multi-key
+traversal routine `mk_witness_for_keys`.
+Internally, a multi-key cursor is just a vector of single-key cursors but where redundantly visited nodes are deduplicated.
+This multi-key cursor recursively expands the trie frontier, one level at a time.
+The nodes at every level reachable by the multi-key cursor are then processed, depending on the implementation of the `TrieFrontierCursor` trait.
+This either amounts to:
+
+- `prune_for_keys` - pruning non-reachable nodes
+- `to_witness_for_keys/to_hash_witness_for_keys` - copying reachable nodes as stubs into an under-construction witness

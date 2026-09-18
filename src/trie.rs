@@ -2,7 +2,7 @@
 
 use crate::digestible::Digestible;
 use crate::digestible::HashWitnessValue;
-use crate::node::{Node, NodeLink, TrieMode, Complete, Partial};
+use crate::node::{Complete, Node, NodeLink, Partial, TrieMode};
 use crate::utils::{Allocator, Box, copy_slice_into_box};
 use allocator_api2::alloc::Global;
 use digest::{Digest, Output};
@@ -193,7 +193,7 @@ impl<T: Digestible, const N: usize, const K: usize, H: Digest, A: Allocator + Cl
     /// - `Ok(None)` indicating key's presence/absence was expected
     /// - `Ok(Some((idx,true)))` indicating key's presence/absence was unexpected,
     /// - `Ok(Some((idx,false)))` indicating key's presence/absence is unknown,
-    /// 
+    ///
     /// Note that the final case is only possible for [`Partial`] tries
     /// where some nodes have been pruned.
     pub fn verify_each_key<'a>(
@@ -213,17 +213,24 @@ impl<T: Digestible, const N: usize, const K: usize, H: Digest, A: Allocator + Cl
 
     /// Given a target keys vector and an expected presence vector,
     /// return true iff each key's presence in the trie provably matches its expected presence, where:
+    ///
     /// - Some(false) - indicates a key's absence is expected
     /// - Some(true)  - indicates a key's presence is expected
     /// - None        - indicates a key's presence/absence is unprovable
+    ///
     /// return false otherwise or if any key has an invalid length.
-    pub fn verify_keys<'a>(&self, target_keys: impl Borrow<Vec<&'a [u8]>>, expected: impl Borrow<Vec<Option<bool>>>) -> bool {
-        let (target_keys,expected) = (target_keys.borrow(), expected.borrow());
+    pub fn verify_keys<'a>(
+        &self,
+        target_keys: impl Borrow<Vec<&'a [u8]>>,
+        expected: impl Borrow<Vec<Option<bool>>>,
+    ) -> bool {
+        let (target_keys, expected) = (target_keys.borrow(), expected.borrow());
         if target_keys.len() != expected.len() {
-            return false
+            return false;
         }
         let iter = target_keys.iter().copied().zip(expected.iter().copied());
-        self.verify_each_key(iter).all(|res| res.is_ok_and(|opt| opt.is_none()))
+        self.verify_each_key(iter)
+            .all(|res| res.is_ok_and(|opt| opt.is_none()))
     }
 
     /// Return the digest of the trie
@@ -269,7 +276,10 @@ impl<T: Digestible, const N: usize, const K: usize, A: Allocator + Clone, H: Dig
     /// Given a complete trie and a set of keys, build the minimal partial trie that
     /// proves the non/existence of each key in the set in the trie, representing
     /// values outside the witness by their digest rather than requiring `T: Clone`.
-    pub fn to_hash_witness_for_keys(&self, keys: Vec<&[u8]>) -> Trie<HashWitnessValue<H>, N, K, H, A, Partial> {
+    pub fn to_hash_witness_for_keys(
+        &self,
+        keys: Vec<&[u8]>,
+    ) -> Trie<HashWitnessValue<H>, N, K, H, A, Partial> {
         let witness_root = self.1.to_hash_witness_for_keys(keys, self.0.clone());
         Trie(self.0.clone(), witness_root)
     }
@@ -313,14 +323,8 @@ impl<
 
 /// The debug format of a Merkle trie is a nested presentation of the trie structure;
 /// leaf values are elided as `..` (see [`Trie::debug_with_values`] to print them).
-impl<
-    T: Digestible,
-    const N: usize,
-    const K: usize,
-    H: Digest,
-    A: Allocator + Clone,
-    M: TrieMode,
-> Debug for Trie<T, N, K, H, A, M>
+impl<T: Digestible, const N: usize, const K: usize, H: Digest, A: Allocator + Clone, M: TrieMode>
+    Debug for Trie<T, N, K, H, A, M>
 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         self.1.debug_fmt(0, None, f)

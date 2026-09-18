@@ -129,7 +129,11 @@ pub fn find_first_distinct_bits(
         } else {
             // all wanted bits matched; if lengths differ, the extra bits are "different"
             return if a_bits != b_bits {
-                mkdiff(i, (offset + wanted_bits) % 8, Some((a_bits > b_bits) as usize))
+                mkdiff(
+                    i,
+                    (offset + wanted_bits) % 8,
+                    Some((a_bits > b_bits) as usize),
+                )
             } else {
                 None
             };

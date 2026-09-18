@@ -240,7 +240,10 @@ impl<T: Digestible, const N: usize, const K: usize, H: Digest, A: Allocator + Cl
                 match bound {
                     Some(0) => {
                         debug!("For {}, search bound hit at node {}", to_ascii(key), label);
-                        return action(pos, ProbeResult::Bounded(opt_ref, global_pos.increment::<K>(), slot));
+                        return action(
+                            pos,
+                            ProbeResult::Bounded(opt_ref, global_pos.increment::<K>(), slot),
+                        );
                     }
                     Some(ref mut n) => *n -= 1,
                     _ => {}
@@ -313,7 +316,10 @@ impl<T: Digestible, const N: usize, const K: usize, H: Digest, A: Allocator + Cl
                 match bound {
                     Some(0) => {
                         debug!("For {}, search bound hit at node {}", to_ascii(key), label);
-                        return action(pos, ProbeResult::Bounded(opt_mut, global_pos.increment::<K>(), slot));
+                        return action(
+                            pos,
+                            ProbeResult::Bounded(opt_mut, global_pos.increment::<K>(), slot),
+                        );
                     }
                     Some(ref mut n) => *n -= 1,
                     _ => {}
@@ -522,9 +528,7 @@ impl<T: Digestible, const N: usize, const K: usize, H: Digest, A: Allocator + Cl
                             Some(true)
                         }
                     }
-                    EmptySlot(..) => {
-                        Some(false)
-                    }
+                    EmptySlot(..) => Some(false),
                     // if disagreement is such that we could continue exploration
                     // from an opaque, give up; otherwise, we found a true negative
                     Disagreement(node, diff) => {
@@ -763,7 +767,7 @@ pub(super) trait TrieFrontierCursor<
 /// keys by walking over the trie structure, level-by-level,
 /// using a [`TrieFrontierCursor`].
 #[allow(clippy::single_match)]
-pub(super) fn to_witness_for_keys_generic<
+pub(super) fn mk_witness_for_keys<
     T: Digestible,
     const N: usize,
     const K: usize,
@@ -888,7 +892,7 @@ impl<T: Digestible, const N: usize, const K: usize, A: Allocator + Clone, H: Dig
     /// Implement [`Trie::witness_for_keys`] via visiting every node reachable
     /// by a key in `keys` and then pruning all nodes that are not reachable in this manner
     pub(super) fn prune_for_keys(&mut self, keys: Vec<&[u8]>) {
-        to_witness_for_keys_generic(self, keys);
+        mk_witness_for_keys(self, keys);
     }
 }
 
@@ -971,7 +975,7 @@ impl<T: Digestible + Clone, const N: usize, const K: usize, A: Allocator + Clone
     ) -> NodeLink<T, N, K, H, A, Partial> {
         let mut new_root = self.clone_as_leaf();
         let builder = WitnessBuilder(self, &mut new_root, alloc);
-        to_witness_for_keys_generic(builder, keys);
+        mk_witness_for_keys(builder, keys);
         new_root
     }
 
@@ -1011,15 +1015,8 @@ struct HashWitnessBuilder<
     A,
 );
 
-impl<
-    'src,
-    'tgt,
-    T: Digestible,
-    const N: usize,
-    const K: usize,
-    H: Digest,
-    A: Allocator + Clone,
-> TrieFrontierCursor<T, N, K, H, A> for HashWitnessBuilder<'src, 'tgt, T, N, K, H, A>
+impl<'src, 'tgt, T: Digestible, const N: usize, const K: usize, H: Digest, A: Allocator + Clone>
+    TrieFrontierCursor<T, N, K, H, A> for HashWitnessBuilder<'src, 'tgt, T, N, K, H, A>
 {
     fn source(&self) -> &NodeLink<T, N, K, H, A, Partial> {
         // SAFETY: NodeLink<..., Complete> and NodeLink<..., Partial> are
@@ -1061,7 +1058,8 @@ impl<
     }
 }
 
-impl<T: Digestible, const N: usize, const K: usize, A: Allocator + Clone, H: Digest> NodeLink<T, N, K, H, A, Complete>
+impl<T: Digestible, const N: usize, const K: usize, A: Allocator + Clone, H: Digest>
+    NodeLink<T, N, K, H, A, Complete>
 {
     /// The internal implementation of [`Trie::to_hash_witness_for_keys`]
     pub fn to_hash_witness_for_keys(
@@ -1071,7 +1069,7 @@ impl<T: Digestible, const N: usize, const K: usize, A: Allocator + Clone, H: Dig
     ) -> NodeLink<HashWitnessValue<H>, N, K, H, A, Partial> {
         let mut new_root = self.clone_as_hash_leaf();
         let builder = HashWitnessBuilder(self, &mut new_root, alloc);
-        to_witness_for_keys_generic(builder, keys);
+        mk_witness_for_keys(builder, keys);
         new_root
     }
 
@@ -1081,11 +1079,20 @@ impl<T: Digestible, const N: usize, const K: usize, A: Allocator + Clone, H: Dig
             return NodeLink(None);
         };
         let kind: Kind<HashWitnessValue<H>, N, K, H, A, Complete> = match node.kind {
-            Leaf { .. } => Leaf { value: HashWitnessValue(node.digest()), _phantom: PhantomData },
-            Branch { mask, .. } => Branch { mask, children: [const { NodeLink(None) }; K] },
+            Leaf { .. } => Leaf {
+                value: HashWitnessValue(node.digest()),
+                _phantom: PhantomData,
+            },
+            Branch { mask, .. } => Branch {
+                mask,
+                children: [const { NodeLink(None) }; K],
+            },
             Opaque(_, tag) => match tag {},
         };
-        let node_copy = Node { key: node.key.clone(), kind };
+        let node_copy = Node {
+            key: node.key.clone(),
+            kind,
+        };
         let node: Box<Node<HashWitnessValue<H>, N, K, H, A, Complete>, A> =
             Box::new_in(node_copy, Box::allocator(node).clone());
         NodeLink(Some((hash.clone(), node))).into_partial()
@@ -1130,42 +1137,24 @@ impl<
 }
 
 /// The debug format of a node is a nested presentation of the trie structure
-impl<
-    T: Digestible,
-    const N: usize,
-    const K: usize,
-    H: Digest,
-    A: Allocator + Clone,
-    M: TrieMode,
-> Debug for NodeLink<T, N, K, H, A, M>
+impl<T: Digestible, const N: usize, const K: usize, H: Digest, A: Allocator + Clone, M: TrieMode>
+    Debug for NodeLink<T, N, K, H, A, M>
 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         self.debug_fmt(0, None, f)
     }
 }
 
-impl<
-    T: Digestible,
-    const N: usize,
-    const K: usize,
-    H: Digest,
-    A: Allocator + Clone,
-    M: TrieMode,
-> Debug for Node<T, N, K, H, A, M>
+impl<T: Digestible, const N: usize, const K: usize, H: Digest, A: Allocator + Clone, M: TrieMode>
+    Debug for Node<T, N, K, H, A, M>
 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         self.debug_fmt(0, f)
     }
 }
 
-impl<
-    T: Digestible,
-    const N: usize,
-    const K: usize,
-    H: Digest,
-    A: Allocator + Clone,
-    M: TrieMode,
-> NodeLink<T, N, K, H, A, M>
+impl<T: Digestible, const N: usize, const K: usize, H: Digest, A: Allocator + Clone, M: TrieMode>
+    NodeLink<T, N, K, H, A, M>
 {
     /// This function drives the [`Debug`] implementation for [`Trie`]. Leaf values are
     /// always elided as `..`; see [`Self::debug_fmt_verbose`] to print them when `T: Debug`.
@@ -1230,14 +1219,9 @@ impl<
     }
 }
 
-impl<
-    T: Digestible,
-    const N: usize,
-    const K: usize,
-    H: Digest,
-    A: Allocator + Clone,
-    M: TrieMode,
-> Node<T, N, K, H, A, M> {
+impl<T: Digestible, const N: usize, const K: usize, H: Digest, A: Allocator + Clone, M: TrieMode>
+    Node<T, N, K, H, A, M>
+{
     /// See [`NodeLink::debug_fmt`].
     pub(super) fn debug_fmt(
         &self,
@@ -1355,7 +1339,11 @@ mod witness_tests {
             t.set(key, W(i as u64)).unwrap();
         }
         for (i, key) in keys.iter().enumerate() {
-            assert_eq!(t.get(key), Ok(Some(&W(i as u64))), "key {key:?} lost after insert");
+            assert_eq!(
+                t.get(key),
+                Ok(Some(&W(i as u64))),
+                "key {key:?} lost after insert"
+            );
         }
 
         let all_keys = keys.to_vec();
@@ -1416,9 +1404,12 @@ mod witness_tests {
         // - key [1,2,4] is provably absent (as lookup diverges before reaching the pruned subtrie)
         // - key [1,2,5]'s presence/absence is unprovable
         // provable from witness1 alone, so we don't assert anything about it here
-        let witness1_keys: Vec<&[u8]> = vec![&[1, 2, 3], &[1, 2, 4], &[1,2,5]];
+        let witness1_keys: Vec<&[u8]> = vec![&[1, 2, 3], &[1, 2, 4], &[1, 2, 5]];
         let witness1_expected = vec![Some(true), Some(false), None];
-        assert_eq!(witness1.verify_keys(&witness1_keys, &witness1_expected), true);
+        assert_eq!(
+            witness1.verify_keys(&witness1_keys, &witness1_expected),
+            true
+        );
 
         // witness2:
         // since all of the leaf nodes in the trie are obscured, only
